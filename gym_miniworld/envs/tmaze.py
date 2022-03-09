@@ -77,3 +77,29 @@ class TMazeLeft(TMaze):
 class TMazeRight(TMaze):
     def __init__(self):
         super().__init__(goal_pos=[10, 0, 6])
+
+class TMazeDynamic(TMaze):
+    def __init__(self, sub_task_length: int = 100):
+
+        # keep track of episode count so we know when to swap the task location
+        self.episode_count = 0
+        self.sub_task_length = sub_task_length
+
+        # two possible locations: left or right
+        self.goals = [[10,0,-6], [10,0,6]]
+        self.n_goals = len(self.goals)
+
+        # current goal = 0 or 1: used to index the goals list
+        self.current_goal = 0
+
+        super().__init__(goal_pos=[10,0,-6])
+
+    def reset(self):
+        self.episode_count += 1
+        if self.episode_count % self.sub_task_length == 0:
+            self.current_goal = (self.current_goal + 1) % self.n_goals
+            self.goal_pos = self.goals[self.current_goal]
+
+        obs = super().reset()
+        return obs
+
