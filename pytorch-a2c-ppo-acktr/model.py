@@ -12,15 +12,15 @@ class Flatten(nn.Module):
 
 
 class Policy(nn.Module):
-    def __init__(self, obs_shape, action_space, base_kwargs=None):
+    def __init__(self, obs_shape, action_space, feature_size, base_kwargs=None):
         super(Policy, self).__init__()
         if base_kwargs is None:
             base_kwargs = {}
 
         if len(obs_shape) == 3:
-            self.base = CNNBase(obs_shape[0], **base_kwargs)
+            self.base = CNNBase(obs_shape[0], feature_size, **base_kwargs)
         elif len(obs_shape) == 1:
-            self.base = MLPBase(obs_shape[0], **base_kwargs)
+            self.base = MLPBase(obs_shape[0], feature_size, **base_kwargs)
         else:
             raise NotImplementedError
 
@@ -42,11 +42,11 @@ class Policy(nn.Module):
         """Size of rnn_hx."""
         return self.base.recurrent_hidden_state_size
 
-    def forward(self, inputs, rnn_hxs, masks):
+    def forward(self, inputs, rnn_hxs, masks, features = None):
         raise NotImplementedError
 
-    def act(self, inputs, rnn_hxs, masks, deterministic=False):
-        value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks)
+    def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
+        value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks, features)
         dist = self.dist(actor_features)
 
         if deterministic:
@@ -59,12 +59,12 @@ class Policy(nn.Module):
 
         return value, action, action_log_probs, rnn_hxs
 
-    def get_value(self, inputs, rnn_hxs, masks):
-        value, _, _ = self.base(inputs, rnn_hxs, masks)
+    def get_value(self, inputs, rnn_hxs, masks, features = None):
+        value, _, _ = self.base(inputs, rnn_hxs, masks, features)
         return value
 
-    def evaluate_actions(self, inputs, rnn_hxs, masks, action):
-        value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks)
+    def evaluate_actions(self, inputs, rnn_hxs, masks, action, features = None):
+        value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks, features)
         dist = self.dist(actor_features)
 
         action_log_probs = dist.log_probs(action)
@@ -75,11 +75,13 @@ class Policy(nn.Module):
 
 class NNBase(nn.Module):
 
-    def __init__(self, recurrent, recurrent_input_size, hidden_size):
+    def __init__(self, recurrent, recurrent_input_size, hidden_size, feature_size):
         super(NNBase, self).__init__()
 
         self._hidden_size = hidden_size
         self._recurrent = recurrent
+        self._feature_size = feature_size
+
 
         if recurrent:
             self.gru = nn.GRUCell(recurrent_input_size, hidden_size)
@@ -140,8 +142,9 @@ class Print(nn.Module):
 
 
 class CNNBase(NNBase):
-    def __init__(self, num_inputs, recurrent=False, hidden_size=128):
-        super(CNNBase, self).__init__(recurrent, hidden_size, hidden_size)
+    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=128):
+        super(CNNBase, self).__init__(recurrent, hidden_size + feature_size, hidden_size, feature_size)
+        self.feature_size = feature_size
 
         init_ = lambda m: init(m,
             nn.init.orthogonal_,
@@ -179,13 +182,14 @@ class CNNBase(NNBase):
 
         self.train()
 
-    def forward(self, inputs, rnn_hxs, masks):
+    def forward(self, inputs, rnn_hxs, masks, features = None):
         #print(inputs.size())
 
         x = inputs / 255.0
         #print(x.size())
 
         x = self.main(x)
+        x = torch.cat([x, features], axis = -1)
         #print(x.size())
 
         if self.is_recurrent:
@@ -195,8 +199,8 @@ class CNNBase(NNBase):
 
 
 class MLPBase(NNBase):
-    def __init__(self, num_inputs, recurrent=False, hidden_size=64):
-        super(MLPBase, self).__init__(recurrent, num_inputs, hidden_size)
+    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=64):
+        super(MLPBase, self).__init__(recurrent, num_inputs + feature_size, hidden_size, feature_size = 2)
 
         if recurrent:
             num_inputs = hidden_size
@@ -206,29 +210,29 @@ class MLPBase(NNBase):
             lambda x: nn.init.constant_(x, 0))
 
         self.actor = nn.Sequential(
-            init_(nn.Linear(num_inputs, hidden_size)),
+            init_(nn.Linear(num_inputs + feature_size, hidden_size)),
             nn.Tanh(),
             init_(nn.Linear(hidden_size, hidden_size)),
             nn.Tanh()
         )
 
         self.critic = nn.Sequential(
-            init_(nn.Linear(num_inputs, hidden_size)),
+            init_(nn.Linear(num_inputs + feature_size, hidden_size)),
             nn.Tanh(),
             init_(nn.Linear(hidden_size, hidden_size)),
             nn.Tanh()
         )
 
-        self.critic_linear = init_(nn.Linear(hidden_size, 1))
+        self.critic_linear = init_(nn.Linear(hidden_size + feature_size, 1))
 
         self.train()
 
-    def forward(self, inputs, rnn_hxs, masks):
-        x = inputs
+    def forward(self, inputs, rnn_hxs, masks, features = None):
+        x = torch.cat([inputs, features], axis = -1 )
+
 
         if self.is_recurrent:
             x, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)
-
         hidden_critic = self.critic(x)
         hidden_actor = self.actor(x)
 

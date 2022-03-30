@@ -59,7 +59,7 @@ def main():
         viz = Visdom(port=args.port)
         win = None
     """
-
+    feature_size = 2
     envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                         args.gamma, args.log_dir, args.add_timestep, device, False)
 
@@ -72,7 +72,8 @@ def main():
         agent = algo.A2C_ACKTR(actor_critic, args.value_loss_coef,
                                args.entropy_coef, lr=args.lr,
                                eps=args.eps, alpha=args.alpha,
-                               max_grad_norm=args.max_grad_norm)
+                               max_grad_norm=args.max_grad_norm,
+                               envs.venv.env[0].feature_size)
     elif args.algo == 'ppo':
         agent = algo.PPO(actor_critic, args.clip_param, args.ppo_epoch, args.num_mini_batch,
                          args.value_loss_coef, args.entropy_coef, lr=args.lr,
@@ -87,6 +88,11 @@ def main():
                         actor_critic.recurrent_hidden_state_size)
 
     obs = envs.reset()
+
+    # create a dummy feature
+    dummy_feature = torch.zeros([args.num_processes, feature_size])
+
+    rollouts.feature[0].copy_(dummy_feature)
     rollouts.obs[0].copy_(obs)
     rollouts.to(device)
 
@@ -100,10 +106,18 @@ def main():
                 value, action, action_log_prob, recurrent_hidden_states = actor_critic.act(
                         rollouts.obs[step],
                         rollouts.recurrent_hidden_states[step],
-                        rollouts.masks[step])
+                        rollouts.masks[step],
+                        rollouts.features[step])
 
             # Obser reward and next obs
             obs, reward, done, infos = envs.step(action)
+            # info is a tuple of dicts
+            _feature = []
+            for info in infos:
+                if "feature" in info.keys():
+                    _feature.append(info["feature"])
+
+            feature = np.stack(_feature, axis = 0)
 
             """
             for info in infos:
@@ -119,12 +133,13 @@ def main():
 
             # If done then clean the history of observations.
             masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
-            rollouts.insert(obs, recurrent_hidden_states, action, action_log_prob, value, reward, masks)
+            rollouts.insert(obs, recurrent_hidden_states, action, action_log_prob, value, reward, masks, feature)
 
         with torch.no_grad():
             next_value = actor_critic.get_value(rollouts.obs[-1],
                                                 rollouts.recurrent_hidden_states[-1],
-                                                rollouts.masks[-1]).detach()
+                                                rollouts.masks[-1],
+                                                rollouts.features[-1]).detach(0)
 
         rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.tau)
 
@@ -195,7 +210,7 @@ def main():
             while len(eval_episode_rewards) < 10:
                 with torch.no_grad():
                     _, action, _, eval_recurrent_hidden_states = actor_critic.act(
-                        obs, eval_recurrent_hidden_states, eval_masks, deterministic=True)
+                        obs, eval_recurrent_hidden_states, eval_masks, eval_features, deterministic=True)
 
                 # Obser reward and next obs
                 obs, reward, done, infos = eval_envs.step(action)
