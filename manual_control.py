@@ -41,7 +41,7 @@ def step(action):
 
     obs, reward, done, info = env.step(action)
 
-    if reward > 0:
+    if reward != 0:
         print('reward={:.2f}'.format(reward))
 
     if done:
