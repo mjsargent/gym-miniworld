@@ -63,7 +63,7 @@ def main():
     envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                         args.gamma, args.log_dir, args.add_timestep, device, False)
 
-    actor_critic = Policy(envs.observation_space.shape, envs.action_space,
+    actor_critic = Policy(envs.observation_space.shape, envs.action_space, feature_size = 2,
         base_kwargs={'recurrent': args.recurrent_policy})
     actor_critic.to(device)
 
@@ -73,7 +73,7 @@ def main():
                                args.entropy_coef, lr=args.lr,
                                eps=args.eps, alpha=args.alpha,
                                max_grad_norm=args.max_grad_norm,
-                               envs.venv.env[0].feature_size)
+                               feature_size = 2)
     elif args.algo == 'ppo':
         agent = algo.PPO(actor_critic, args.clip_param, args.ppo_epoch, args.num_mini_batch,
                          args.value_loss_coef, args.entropy_coef, lr=args.lr,
@@ -85,14 +85,14 @@ def main():
 
     rollouts = RolloutStorage(args.num_steps, args.num_processes,
                         envs.observation_space.shape, envs.action_space,
-                        actor_critic.recurrent_hidden_state_size)
+                        actor_critic.recurrent_hidden_state_size, feature_dim = feature_size)
 
     obs = envs.reset()
 
     # create a dummy feature
     dummy_feature = torch.zeros([args.num_processes, feature_size])
 
-    rollouts.feature[0].copy_(dummy_feature)
+    rollouts.features[0].copy_(dummy_feature)
     rollouts.obs[0].copy_(obs)
     rollouts.to(device)
 
@@ -117,7 +117,7 @@ def main():
                 if "feature" in info.keys():
                     _feature.append(info["feature"])
 
-            feature = np.stack(_feature, axis = 0)
+            feature = torch.tensor(np.stack(_feature, axis = 0)).to(device)
 
             """
             for info in infos:
@@ -129,7 +129,7 @@ def main():
             # FIXME: works only for environments with sparse rewards
             for idx, eps_done in enumerate(done):
                 if eps_done:
-                    episode_rewards.append(reward[idx])
+                    episode_rewards.append(np.array(reward[idx]))
 
             # If done then clean the history of observations.
             masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
@@ -139,7 +139,7 @@ def main():
             next_value = actor_critic.get_value(rollouts.obs[-1],
                                                 rollouts.recurrent_hidden_states[-1],
                                                 rollouts.masks[-1],
-                                                rollouts.features[-1]).detach(0)
+                                                rollouts.features[-1]).detach()
 
         rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.tau)
 
@@ -207,6 +207,9 @@ def main():
                             actor_critic.recurrent_hidden_state_size, device=device)
             eval_masks = torch.zeros(args.num_processes, 1, device=device)
 
+            # create a dummy feature
+            eval_features = torch.zeros([args.num_processes, feature_size])
+
             while len(eval_episode_rewards) < 10:
                 with torch.no_grad():
                     _, action, _, eval_recurrent_hidden_states = actor_critic.act(
@@ -214,6 +217,13 @@ def main():
 
                 # Obser reward and next obs
                 obs, reward, done, infos = eval_envs.step(action)
+
+                _feature = []
+                for info in infos:
+                    if "feature" in info.keys():
+                        _feature.append(info["feature"])
+                eval_feature = np.stack(_feature, axis = 0)
+
                 eval_masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
                 for info in infos:
                     if 'episode' in info.keys():

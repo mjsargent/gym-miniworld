@@ -211,7 +211,7 @@ class TMazeTwoBoxDynamicFeatures(MiniWorldEnv):
     def __init__(
         self,
         goal_pos=None,
-        sub_task_length = 50,
+        sub_task_length = 500000000,
         **kwargs
     ):
         self.goal_pos = goal_pos

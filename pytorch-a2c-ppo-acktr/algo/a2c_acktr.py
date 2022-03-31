@@ -10,6 +10,7 @@ class A2C_ACKTR():
                  actor_critic,
                  value_loss_coef,
                  entropy_coef,
+                 feature_size=2,
                  lr=None,
                  eps=None,
                  alpha=None,
@@ -23,6 +24,7 @@ class A2C_ACKTR():
         self.entropy_coef = entropy_coef
 
         self.max_grad_norm = max_grad_norm
+        self.feature_size = feature_size
 
         if acktr:
             self.optimizer = KFACOptimizer(actor_critic)
@@ -39,7 +41,8 @@ class A2C_ACKTR():
             rollouts.obs[:-1].view(-1, *obs_shape),
             rollouts.recurrent_hidden_states[0].view(-1, self.actor_critic.recurrent_hidden_state_size),
             rollouts.masks[:-1].view(-1, 1),
-            rollouts.actions.view(-1, action_shape))
+            rollouts.actions.view(-1, action_shape),
+            rollouts.features[:-1].view(-1, self.feature_size))
 
         values = values.view(num_steps, num_processes, 1)
         action_log_probs = action_log_probs.view(num_steps, num_processes, 1)

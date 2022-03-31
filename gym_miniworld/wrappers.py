@@ -43,3 +43,4 @@ class GreyscaleWrapper(gym.ObservationWrapper):
         )
 
         return np.expand_dims(obs, axis=2)
+

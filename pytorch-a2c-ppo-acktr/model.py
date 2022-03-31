@@ -102,7 +102,7 @@ class NNBase(nn.Module):
 
     @property
     def output_size(self):
-        return self._hidden_size
+        return self._hidden_size + self._feature_size
 
     def _forward_gru(self, x, hxs, masks):
         if x.size(0) == hxs.size(0):
@@ -178,7 +178,7 @@ class CNNBase(NNBase):
             nn.init.orthogonal_,
             lambda x: nn.init.constant_(x, 0))
 
-        self.critic_linear = init_(nn.Linear(hidden_size, 1))
+        self.critic_linear = init_(nn.Linear(hidden_size + feature_size, 1))
 
         self.train()
 
