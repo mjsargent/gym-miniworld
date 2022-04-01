@@ -73,6 +73,89 @@ class Policy(nn.Module):
         return value, action_log_probs, dist_entropy, rnn_hxs
 
 
+class SFPolicy(nn.Module):
+    def __init__(self, obs_shape, action_space, feature_size, learnt_phi = False, eps = 0.05, base_kwargs=None):
+        super(Policy, self).__init__()
+        if base_kwargs is None:
+            base_kwargs = {}
+
+        self.phi_net = None
+        self.eps = eps
+        self.estimated_w = torch.randn(feature_size)
+
+        if len(obs_shape) == 3:
+            self.psi_net = CNNBase(obs_shape[0], feature_size, **base_kwargs)
+            if learnt_phi = True:
+                self.phi_net = CNNBase(obs_shape[0], feature_size = 0, **base_kwargs)
+
+        elif len(obs_shape) == 1:
+            self.base = MLPBase(obs_shape[0], feature_size, **base_kwargs)
+            if learnt_phi = True:
+                self.phi_net = CNNBase(obs_shape[0], feature_size = 0, **base_kwargs)
+        else:
+            raise NotImplementedError
+
+        if action_space.__class__.__name__ == "Discrete":
+            num_outputs = action_space.n
+            self.dist = Categorical(self.base.output_size, num_outputs)
+        elif action_space.__class__.__name__ == "Box":
+            num_outputs = action_space.shape[0]
+            self.dist = DiagGaussian(self.base.output_size, num_outputs)
+        else:
+            raise NotImplementedError
+
+    @property
+    def is_recurrent(self):
+        return self.base.is_recurrent
+
+    @property
+    def recurrent_hidden_state_size(self):
+        """Size of rnn_hx."""
+        return self.base.recurrent_hidden_state_size
+
+    def forward(self, inputs, rnn_hxs, masks, features = None):
+        raise NotImplementedError
+
+    def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
+        # return q values
+        # psi: NXB, |phi|
+        psi, rnn_hxs = self.base(inputs, rnn_hxs, masks, features)
+        with torch.no_grad:
+            q = psi * self.estimated_w.unsqueeze(0).repeat(psi.shape[0], 1)
+
+        if deterministic:
+            r = torch.rand(psi.shape[0]).to(psi.device)
+            action = torch.where(r < self.eps, torch.randint(q.shape[1], (psi.shape[0])).to(self.psi_net.device), torch.argmax(q, dim = -1))
+        else:
+            action = torch.argmax(q, dim = -1)
+
+        return q, action, None, rnn_hxs
+
+    def get_value(self, inputs, rnn_hxs, masks, features = None):
+        # overloaded to mean q values
+        q _, _ = self.base(inputs, rnn_hxs, masks, features)
+        return q
+
+    def evaluate_actions(self, inputs, rnn_hxs, masks, action, features = None):
+        psi, rnn_hxs = self.base(inputs, rnn_hxs, masks, features)
+        psi = psi.reshape(
+        s = inputs[:-1]
+        next_s = inputs[1:]
+
+        psi = psi[:-1]
+        next_psi = next_psi[1:].clone().detach()
+
+        _phi = features[1:]
+
+        # index with actions and best next actions
+        psi  =
+        action_log_probs = dist.log_probs(action)
+        dist_entropy = dist.entropy().mean()
+
+        return psi_loss, phi_loss, w_loss, rnn_hxs
+
+
+
 class NNBase(nn.Module):
 
     def __init__(self, recurrent, recurrent_input_size, hidden_size, feature_size):
@@ -189,7 +272,9 @@ class CNNBase(NNBase):
         #print(x.size())
 
         x = self.main(x)
-        x = torch.cat([x, features], axis = -1)
+        if self.feature_size > 0:
+
+            x = torch.cat([x, features], axis = -1)
         #print(x.size())
 
         if self.is_recurrent:
@@ -228,7 +313,9 @@ class MLPBase(NNBase):
         self.train()
 
     def forward(self, inputs, rnn_hxs, masks, features = None):
-        x = torch.cat([inputs, features], axis = -1 )
+        x = inputs
+        if self.feature_size > 0:
+            x = torch.cat([inputs, features], axis = -1 )
 
 
         if self.is_recurrent:
