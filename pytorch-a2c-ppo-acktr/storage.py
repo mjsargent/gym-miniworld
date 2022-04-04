@@ -42,8 +42,10 @@ class RolloutStorage(object):
         self.obs[self.step + 1].copy_(obs)
         self.recurrent_hidden_states[self.step + 1].copy_(recurrent_hidden_states)
         self.actions[self.step].copy_(actions)
-        self.action_log_probs[self.step].copy_(action_log_probs)
-        self.value_preds[self.step].copy_(value_preds)
+        if action_log_probs != None:
+            self.action_log_probs[self.step].copy_(action_log_probs)
+        if value_preds != None:
+            self.value_preds[self.step].copy_(value_preds)
         self.rewards[self.step].copy_(rewards)
         self.masks[self.step + 1].copy_(masks)
         self.features[self.step + 1].copy_(feature)
@@ -54,6 +56,8 @@ class RolloutStorage(object):
         self.obs[0].copy_(self.obs[-1])
         self.recurrent_hidden_states[0].copy_(self.recurrent_hidden_states[-1])
         self.masks[0].copy_(self.masks[-1])
+        # TODO double check if this is needed
+        self.features[0].copy_(self.features[-1])
 
     def compute_returns(self, next_value, use_gae, gamma, tau):
         if use_gae:

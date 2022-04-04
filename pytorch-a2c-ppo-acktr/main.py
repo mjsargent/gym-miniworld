@@ -15,13 +15,13 @@ import torch.optim as optim
 import algo
 from arguments import get_args
 from envs import make_vec_envs
-from model import Policy
+from model import Policy, SFPolicy
 from storage import RolloutStorage
 #from visualize import visdom_plot
 
 args = get_args()
 
-assert args.algo in ['a2c', 'ppo', 'acktr']
+assert args.algo in ['a2c', 'ppo', 'acktr', 'sf']
 if args.recurrent_policy:
     assert args.algo in ['a2c', 'ppo'], \
         'Recurrent policy is not implemented for ACKTR'
@@ -59,13 +59,19 @@ def main():
         viz = Visdom(port=args.port)
         win = None
     """
+
     feature_size = 2
     envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                         args.gamma, args.log_dir, args.add_timestep, device, False)
 
-    actor_critic = Policy(envs.observation_space.shape, envs.action_space, feature_size = 2,
-        base_kwargs={'recurrent': args.recurrent_policy})
-    actor_critic.to(device)
+    if args.algo == 'sf':
+        policy= SFPolicy(envs.observation_space.shape, envs.action_space, feature_size = 2,
+            base_kwargs={'recurrent': args.recurrent_policy})
+        policy.to(device)
+    else:
+        actor_critic = Policy(envs.observation_space.shape, envs.action_space, feature_size = 2,
+            base_kwargs={'recurrent': args.recurrent_policy})
+        actor_critic.to(device)
 
 
     if args.algo == 'a2c':
@@ -82,10 +88,19 @@ def main():
     elif args.algo == 'acktr':
         agent = algo.A2C_ACKTR(actor_critic, args.value_loss_coef,
                                args.entropy_coef, acktr=True)
+    elif args.algo == 'sf':
+        agent = algo.SF(policy, feature_size = feature_size,
+                        phi_lr=3e-4, psi_lr=3e-4, eps=0.05)
 
-    rollouts = RolloutStorage(args.num_steps, args.num_processes,
+    if args.algo == "sf":
+        rollouts = RolloutStorage(args.num_steps, args.num_processes,
+                        envs.observation_space.shape, envs.action_space,
+                        policy.recurrent_hidden_state_size, feature_dim = feature_size)
+    else:
+        rollouts = RolloutStorage(args.num_steps, args.num_processes,
                         envs.observation_space.shape, envs.action_space,
                         actor_critic.recurrent_hidden_state_size, feature_dim = feature_size)
+
 
     obs = envs.reset()
 
@@ -99,154 +114,289 @@ def main():
     episode_rewards = deque(maxlen=100)
 
     start = time.time()
-    for j in range(num_updates):
-        for step in range(args.num_steps):
-            # Sample actions
-            with torch.no_grad():
-                value, action, action_log_prob, recurrent_hidden_states = actor_critic.act(
-                        rollouts.obs[step],
-                        rollouts.recurrent_hidden_states[step],
-                        rollouts.masks[step],
-                        rollouts.features[step])
-
-            # Obser reward and next obs
-            obs, reward, done, infos = envs.step(action)
-            # info is a tuple of dicts
-            _feature = []
-            for info in infos:
-                if "feature" in info.keys():
-                    _feature.append(info["feature"])
-
-            feature = torch.tensor(np.stack(_feature, axis = 0)).to(device)
-
-            """
-            for info in infos:
-                if 'episode' in info.keys():
-                    print(reward)
-                    episode_rewards.append(info['episode']['r'])
-            """
-
-            # FIXME: works only for environments with sparse rewards
-            for idx, eps_done in enumerate(done):
-                if eps_done:
-                    episode_rewards.append(np.array(reward[idx]))
-
-            # If done then clean the history of observations.
-            masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
-            rollouts.insert(obs, recurrent_hidden_states, action, action_log_prob, value, reward, masks, feature)
-
-        with torch.no_grad():
-            next_value = actor_critic.get_value(rollouts.obs[-1],
-                                                rollouts.recurrent_hidden_states[-1],
-                                                rollouts.masks[-1],
-                                                rollouts.features[-1]).detach()
-
-        rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.tau)
-
-        value_loss, action_loss, dist_entropy = agent.update(rollouts)
-
-        rollouts.after_update()
-
-        if j % args.save_interval == 0 and args.save_dir != "":
-            print('Saving model')
-            print()
-
-            save_path = os.path.join(args.save_dir, args.algo)
-            try:
-                os.makedirs(save_path)
-            except OSError:
-                pass
-
-            # A really ugly way to save a model to CPU
-            save_model = actor_critic
-            if args.cuda:
-                save_model = copy.deepcopy(actor_critic).cpu()
-
-            save_model = [save_model, hasattr(envs.venv, 'ob_rms') and envs.venv.ob_rms or None]
-
-            torch.save(save_model, os.path.join(save_path, args.env_name + ".pt"))
-
-        total_num_steps = (j + 1) * args.num_processes * args.num_steps
-
-        if j % args.log_interval == 0 and len(episode_rewards) > 1:
-            end = time.time()
-            print("Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.2f}/{:.2f}, min/max reward {:.2f}/{:.2f}, success rate {:.2f}\n".
-                format(
-                    j, total_num_steps,
-                    int(total_num_steps / (end - start)),
-                    len(episode_rewards),
-                    np.mean(episode_rewards),
-                    np.median(episode_rewards),
-                    np.min(episode_rewards),
-                    np.max(episode_rewards),
-                    np.count_nonzero(np.greater(episode_rewards, 0)) / len(episode_rewards)
-                )
-            )
-
-        if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
-            eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,
-                                args.gamma, eval_log_dir, args.add_timestep, device, True)
-
-            if eval_envs.venv.__class__.__name__ == "VecNormalize":
-                eval_envs.venv.ob_rms = envs.venv.ob_rms
-
-                # An ugly hack to remove updates
-                def _obfilt(self, obs):
-                    if self.ob_rms:
-                        obs = np.clip((obs - self.ob_rms.mean) / np.sqrt(self.ob_rms.var + self.epsilon), -self.clipob, self.clipob)
-                        return obs
-                    else:
-                        return obs
-
-                eval_envs.venv._obfilt = types.MethodType(_obfilt, envs.venv)
-
-            eval_episode_rewards = []
-
-            obs = eval_envs.reset()
-            eval_recurrent_hidden_states = torch.zeros(args.num_processes,
-                            actor_critic.recurrent_hidden_state_size, device=device)
-            eval_masks = torch.zeros(args.num_processes, 1, device=device)
-
-            # create a dummy feature
-            eval_features = torch.zeros([args.num_processes, feature_size])
-
-            while len(eval_episode_rewards) < 10:
+    if args.algo == "sf":
+        for j in range(num_updates):
+            for step in range(args.num_steps):
+                # Sample actions
                 with torch.no_grad():
-                    _, action, _, eval_recurrent_hidden_states = actor_critic.act(
-                        obs, eval_recurrent_hidden_states, eval_masks, eval_features, deterministic=True)
-
+                    _, _, action, _ ,  recurrent_hidden_states = policy.act(
+                            rollouts.obs[step],
+                            rollouts.recurrent_hidden_states[step],
+                            rollouts.masks[step],
+                            rollouts.features[step])
                 # Obser reward and next obs
-                obs, reward, done, infos = eval_envs.step(action)
-
+                obs, reward, done, infos = envs.step(action)
+                # info is a tuple of dicts
                 _feature = []
                 for info in infos:
                     if "feature" in info.keys():
                         _feature.append(info["feature"])
-                eval_feature = np.stack(_feature, axis = 0)
 
-                eval_masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
+                feature = torch.tensor(np.stack(_feature, axis = 0)).to(device)
+
+                # FIXME: works only for environments with sparse rewards
+                for idx, eps_done in enumerate(done):
+                    if eps_done:
+                        episode_rewards.append(np.array(reward[idx]))
+
+                # If done then clean the history of observations.
+                masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
+                rollouts.insert(obs = obs,recurrent_hidden_states =  recurrent_hidden_states,
+                                action_log_probs = None, value_preds = None,
+                                actions = action, rewards = reward, masks = masks,
+                                feature = feature)
+
+
+            psi_loss, phi_loss, w_loss = agent.update(rollouts)
+
+            rollouts.after_update()
+
+            if j % args.save_interval == 0 and args.save_dir != "":
+                print('Saving model')
+                print()
+
+                save_path = os.path.join(args.save_dir, args.algo)
+                try:
+                    os.makedirs(save_path)
+                except OSError:
+                    pass
+
+                # A really ugly way to save a model to CPU
+                save_model = policy
+                if args.cuda:
+                    save_model = copy.deepcopy(policy).cpu()
+
+                save_model = [save_model, hasattr(envs.venv, 'ob_rms') and envs.venv.ob_rms or None]
+
+                torch.save(save_model, os.path.join(save_path, args.env_name + ".pt"))
+
+            total_num_steps = (j + 1) * args.num_processes * args.num_steps
+
+            if j % args.log_interval == 0 and len(episode_rewards) > 1:
+                end = time.time()
+                print("Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.2f}/{:.2f}, min/max reward {:.2f}/{:.2f}, success rate {:.2f}\n".
+                    format(
+                        j, total_num_steps,
+                        int(total_num_steps / (end - start)),
+                        len(episode_rewards),
+                        np.mean(episode_rewards),
+                        np.median(episode_rewards),
+                        np.min(episode_rewards),
+                        np.max(episode_rewards),
+                        np.count_nonzero(np.greater(episode_rewards, 0)) / len(episode_rewards)
+                    )
+                )
+
+            if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
+                eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,
+                                    args.gamma, eval_log_dir, args.add_timestep, device, True)
+
+                if eval_envs.venv.__class__.__name__ == "VecNormalize":
+                    eval_envs.venv.ob_rms = envs.venv.ob_rms
+
+                    # An ugly hack to remove updates
+                    def _obfilt(self, obs):
+                        if self.ob_rms:
+                            obs = np.clip((obs - self.ob_rms.mean) / np.sqrt(self.ob_rms.var + self.epsilon), -self.clipob, self.clipob)
+                            return obs
+                        else:
+                            return obs
+                    eval_envs.venv._obfilt = types.MethodType(_obfilt, envs.venv)
+
+                eval_episode_rewards = []
+                obs = eval_envs.reset()
+                eval_recurrent_hidden_states = torch.zeros(args.num_processes, actor_critic.recurrent_hidden_state_size, device=device)
+                eval_masks = torch.zeros(args.num_processes, 1, device=device)
+                # create a dummy feature
+                eval_features = torch.zeros([args.num_processes, feature_size])
+                while len(eval_episode_rewards) < 10:
+                    with torch.no_grad():
+                        _, action, _, _, eval_recurrent_hidden_states = policy.act( obs, eval_recurrent_hidden_states, eval_masks, eval_features, deterministic=True)
+                    # Obser reward and next obs
+                    obs, reward, done, infos = eval_envs.step(action)
+                    _feature = []
+                    for info in infos:
+                        if "feature" in info.keys():
+                            _feature.append(info["feature"])
+                    eval_feature = np.stack(_feature, axis = 0)
+
+                    eval_masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
+                    for info in infos:
+                        if 'episode' in info.keys():
+                            eval_episode_rewards.append(info['episode']['r'])
+
+                eval_envs.close()
+
+                print(" Evaluation using {} episodes: mean reward {:.5f}\n".format(
+                    len(eval_episode_rewards),
+                    np.mean(eval_episode_rewards)
+                ))
+
+            """
+            if args.vis and j % args.vis_interval == 0:
+                try:
+                    # Sometimes monitor doesn't properly flush the outputs
+                    win = visdom_plot(viz, win, args.log_dir, args.env_name,
+                                    args.algo, args.num_frames)
+                except IOError:
+                    pass
+            """
+
+        envs.close()
+
+    else:
+
+        for j in range(num_updates):
+            for step in range(args.num_steps):
+                # Sample actions
+                with torch.no_grad():
+
+
+                    value, action, action_log_prob, recurrent_hidden_states = actor_critic.act(
+                            rollouts.obs[step],
+                            rollouts.recurrent_hidden_states[step],
+                            rollouts.masks[step],
+                            rollouts.features[step])
+
+                # Obser reward and next obs
+                obs, reward, done, infos = envs.step(action)
+
+                # info is a tuple of dicts
+                _feature = []
+                for info in infos:
+                    if "feature" in info.keys():
+                        _feature.append(info["feature"])
+
+                feature = torch.tensor(np.stack(_feature, axis = 0)).to(device)
+
+                """
                 for info in infos:
                     if 'episode' in info.keys():
-                        eval_episode_rewards.append(info['episode']['r'])
+                        print(reward)
+                        episode_rewards.append(info['episode']['r'])
+                """
 
-            eval_envs.close()
+                # FIXME: works only for environments with sparse rewards
+                for idx, eps_done in enumerate(done):
+                    if eps_done:
+                        episode_rewards.append(np.array(reward[idx]))
 
-            print(" Evaluation using {} episodes: mean reward {:.5f}\n".format(
-                len(eval_episode_rewards),
-                np.mean(eval_episode_rewards)
-            ))
+                # If done then clean the history of observations.
+                masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
+                rollouts.insert(obs, recurrent_hidden_states, action, action_log_prob, value, reward, masks, feature)
 
-        """
-        if args.vis and j % args.vis_interval == 0:
-            try:
-                # Sometimes monitor doesn't properly flush the outputs
-                win = visdom_plot(viz, win, args.log_dir, args.env_name,
-                                  args.algo, args.num_frames)
-            except IOError:
-                pass
-        """
+            with torch.no_grad():
+                next_value = actor_critic.get_value(rollouts.obs[-1],
+                                                    rollouts.recurrent_hidden_states[-1],
+                                                    rollouts.masks[-1],
+                                                    rollouts.features[-1]).detach()
 
-    envs.close()
+            rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.tau)
+
+            value_loss, action_loss, dist_entropy = agent.update(rollouts)
+
+            rollouts.after_update()
+
+            if j % args.save_interval == 0 and args.save_dir != "":
+                print('Saving model')
+                print()
+
+                save_path = os.path.join(args.save_dir, args.algo)
+                try:
+                    os.makedirs(save_path)
+                except OSError:
+                    pass
+
+                # A really ugly way to save a model to CPU
+                save_model = actor_critic
+                if args.cuda:
+                    save_model = copy.deepcopy(actor_critic).cpu()
+
+                save_model = [save_model, hasattr(envs.venv, 'ob_rms') and envs.venv.ob_rms or None]
+
+                torch.save(save_model, os.path.join(save_path, args.env_name + ".pt"))
+
+            total_num_steps = (j + 1) * args.num_processes * args.num_steps
+
+            if j % args.log_interval == 0 and len(episode_rewards) > 1:
+                end = time.time()
+                print("Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.2f}/{:.2f}, min/max reward {:.2f}/{:.2f}, success rate {:.2f}\n".
+                    format(
+                        j, total_num_steps,
+                        int(total_num_steps / (end - start)),
+                        len(episode_rewards),
+                        np.mean(episode_rewards),
+                        np.median(episode_rewards),
+                        np.min(episode_rewards),
+                        np.max(episode_rewards),
+                        np.count_nonzero(np.greater(episode_rewards, 0)) / len(episode_rewards)
+                    )
+                )
+
+            if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
+                eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,
+                                    args.gamma, eval_log_dir, args.add_timestep, device, True)
+
+                if eval_envs.venv.__class__.__name__ == "VecNormalize":
+                    eval_envs.venv.ob_rms = envs.venv.ob_rms
+
+                    # An ugly hack to remove updates
+                    def _obfilt(self, obs):
+                        if self.ob_rms:
+                            obs = np.clip((obs - self.ob_rms.mean) / np.sqrt(self.ob_rms.var + self.epsilon), -self.clipob, self.clipob)
+                            return obs
+                        else:
+                            return obs
+
+                    eval_envs.venv._obfilt = types.MethodType(_obfilt, envs.venv)
+
+                eval_episode_rewards = []
+
+                obs = eval_envs.reset()
+                eval_recurrent_hidden_states = torch.zeros(args.num_processes,
+                                actor_critic.recurrent_hidden_state_size, device=device)
+                eval_masks = torch.zeros(args.num_processes, 1, device=device)
+
+                # create a dummy feature
+                eval_features = torch.zeros([args.num_processes, feature_size])
+
+                while len(eval_episode_rewards) < 10:
+                    with torch.no_grad():
+                        _, action, _, eval_recurrent_hidden_states = actor_critic.act(
+                            obs, eval_recurrent_hidden_states, eval_masks, eval_features, deterministic=True)
+
+                    # Obser reward and next obs
+                    obs, reward, done, infos = eval_envs.step(action)
+
+                    _feature = []
+                    for info in infos:
+                        if "feature" in info.keys():
+                            _feature.append(info["feature"])
+                    eval_feature = np.stack(_feature, axis = 0)
+
+                    eval_masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
+                    for info in infos:
+                        if 'episode' in info.keys():
+                            eval_episode_rewards.append(info['episode']['r'])
+
+                eval_envs.close()
+
+                print(" Evaluation using {} episodes: mean reward {:.5f}\n".format(
+                    len(eval_episode_rewards),
+                    np.mean(eval_episode_rewards)
+                ))
+
+            """
+            if args.vis and j % args.vis_interval == 0:
+                try:
+                    # Sometimes monitor doesn't properly flush the outputs
+                    win = visdom_plot(viz, win, args.log_dir, args.env_name,
+                                    args.algo, args.num_frames)
+                except IOError:
+                    pass
+            """
+
+        envs.close()
 
 if __name__ == "__main__":
     main()

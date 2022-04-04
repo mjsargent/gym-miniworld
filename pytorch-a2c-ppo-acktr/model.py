@@ -74,86 +74,143 @@ class Policy(nn.Module):
 
 
 class SFPolicy(nn.Module):
-    def __init__(self, obs_shape, action_space, feature_size, learnt_phi = False, eps = 0.05, base_kwargs=None):
-        super(Policy, self).__init__()
+    def __init__(self, obs_shape, action_space, feature_size, learnt_phi = False, use_target_network = False, eps = 0.05, gamma = 0.99, base_kwargs=None):
+        super(SFPolicy, self).__init__()
         if base_kwargs is None:
             base_kwargs = {}
 
         self.phi_net = None
+        self.gamma = gamma
         self.eps = eps
-        self.estimated_w = torch.randn(feature_size)
+        self.estimated_w = torch.nn.Parameter(torch.randn(feature_size))
+        self.use_target_network = use_target_network
+        self.feature_size =feature_size
+
+        if action_space.__class__.__name__ == "Discrete":
+            self.num_actions = action_space.n
 
         if len(obs_shape) == 3:
-            self.psi_net = CNNBase(obs_shape[0], feature_size, **base_kwargs)
-            if learnt_phi = True:
+            self.psi_net = CNNBase(obs_shape[0], feature_size, SF=True,num_actions=action_space.n, **base_kwargs)
+            if use_target_network:
+                self.target_psi_net = CNNBase(obs_shape[0], feature_size,SF=True, num_actions=action_space.n, **base_kwargs)
+                self.target_psi_net.load_state_dict(self.psi_net.state_dict())
+
+            if learnt_phi == True:
                 self.phi_net = CNNBase(obs_shape[0], feature_size = 0, **base_kwargs)
 
         elif len(obs_shape) == 1:
-            self.base = MLPBase(obs_shape[0], feature_size, **base_kwargs)
-            if learnt_phi = True:
-                self.phi_net = CNNBase(obs_shape[0], feature_size = 0, **base_kwargs)
+            self.psi_net = MLPBase(obs_shape[0], feature_size,num_actions=action_space.n, **base_kwargs)
+            if use_target_network:
+                self.target_psi_net = MLPBase(obs_shape[0], feature_size, SF=True,num_actions=action_space.n, **base_kwargs)
+                self.target_psi_net.load_state_dict(self.psi_net.state_dict())
+
+            if learnt_phi == True:
+                self.phi_net = MLPBase(obs_shape[0], feature_size = 0, **base_kwargs)
         else:
             raise NotImplementedError
 
-        if action_space.__class__.__name__ == "Discrete":
-            num_outputs = action_space.n
-            self.dist = Categorical(self.base.output_size, num_outputs)
-        elif action_space.__class__.__name__ == "Box":
-            num_outputs = action_space.shape[0]
-            self.dist = DiagGaussian(self.base.output_size, num_outputs)
-        else:
-            raise NotImplementedError
+        #if action_space.__class__.__name__ == "Discrete":
+        #    num_outputs = action_space.n
+        #    self.dist = Categorical(self.psi_net.output_size, num_outputs)
+        #elif action_space.__class__.__name__ == "Box":
+        #    num_outputs = action_space.shape[0]
+        #    self.dist = DiagGaussian(self.psi_net.output_size, num_outputs)
+        #else:
+        #    raise NotImplementedError
 
     @property
     def is_recurrent(self):
-        return self.base.is_recurrent
+        return self.psi_net.is_recurrent
 
     @property
     def recurrent_hidden_state_size(self):
         """Size of rnn_hx."""
-        return self.base.recurrent_hidden_state_size
+        return self.psi_net.recurrent_hidden_state_size
 
     def forward(self, inputs, rnn_hxs, masks, features = None):
         raise NotImplementedError
 
     def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
         # return q values
-        # psi: NXB, |phi|
-        psi, rnn_hxs = self.base(inputs, rnn_hxs, masks, features)
-        with torch.no_grad:
-            q = psi * self.estimated_w.unsqueeze(0).repeat(psi.shape[0], 1)
+        # psi: NXB, A*|phi|
+        psi, _,  rnn_hxs = self.psi_net(inputs, rnn_hxs, masks, features)
+        with torch.no_grad():
+            psi = psi.reshape(-1,self.num_actions, self.feature_size)
+            q = psi * self.estimated_w.unsqueeze(0).repeat(psi.shape[0], psi.shape[1], 1)
+            q = q.sum(-1)
 
         if deterministic:
             r = torch.rand(psi.shape[0]).to(psi.device)
             action = torch.where(r < self.eps, torch.randint(q.shape[1], (psi.shape[0])).to(self.psi_net.device), torch.argmax(q, dim = -1))
         else:
-            action = torch.argmax(q, dim = -1)
+            action = torch.argmax(q, dim = -1, keepdims = True)
 
-        return q, action, None, rnn_hxs
+        return q, psi, action, None, rnn_hxs
 
     def get_value(self, inputs, rnn_hxs, masks, features = None):
         # overloaded to mean q values
-        q _, _ = self.base(inputs, rnn_hxs, masks, features)
+        q, _, _ = self.psi_net(inputs, rnn_hxs, masks, features)
         return q
 
-    def evaluate_actions(self, inputs, rnn_hxs, masks, action, features = None):
-        psi, rnn_hxs = self.base(inputs, rnn_hxs, masks, features)
-        psi = psi.reshape(
-        s = inputs[:-1]
-        next_s = inputs[1:]
+    def evaluate_actions(self, inputs, rnn_hxs, masks, action, rewards, features = None, dims = None):
+        # hacky, but we need to know the rollout length and the batch size in
+        # order to align the states into t and t+1
+        T = dims[0]
+        B = dims[1]
 
-        psi = psi[:-1]
-        next_psi = next_psi[1:].clone().detach()
+        psi, _ , rnn_hxs = self.psi_net(inputs, rnn_hxs, masks, features)
+        psi = psi.reshape(T, B, -1)
 
-        _phi = features[1:]
+        s = inputs.reshape(T, B, -1)[:-1]
+        next_s = inputs.reshape(T, B, -1)[1:]
+
+        current_psi = psi[:-1].reshape((T-1)*B, self.num_actions, -1)
+
+        _phi = features.reshape(T, B, -1)[1:]
+
+        if self.use_target_network:
+            #TODO is a target network needed here? USFA does not use one
+            # as far as I can tell. VISR does use one.
+            with torch.no_grad():
+                # get t+1 of each input to the psi net
+                next_rnn_hxs = rnn_hxs.reshape(T, B, -1)[1:].reshape((T-1)*B, -1)
+                next_features= _phi.reshape((T-1)*B, B, -1)
+
+                _ ,next_action, next_psi, _, _ = self.target_psi_net.act(next_s.reshape((T-1)*B, -1), rnn_hxs, features, deterministic = True)
+
+            next_psi = next_psi.clone().detach().reshape((T-1)*B,self.num_actions,-1)
+        else:
+            next_psi = psi[1:].clone().detach().reshape((T-1)*B,self.num_actions,-1)
+            next_q = next_psi * self.estimated_w.unsqueeze(0).unsqueeze(0).repeat(next_psi.shape[0], next_psi.shape[1], 1)
+            next_q = next_q.sum(-1)
+            next_action = torch.argmax(next_q, -1)
+
 
         # index with actions and best next actions
-        psi  =
-        action_log_probs = dist.log_probs(action)
-        dist_entropy = dist.entropy().mean()
+        current_psi = current_psi[range(B*(T-1)), action.reshape(-1)]
+        next_psi = next_psi[range(B*(T-1)), next_action.reshape(-1)]
 
-        return psi_loss, phi_loss, w_loss, rnn_hxs
+        with torch.no_grad():
+            masks = masks.reshape(T, B, -1)
+            masks = masks[1:].reshape((T-1)*B, -1).repeat(1, next_psi.shape[-1])
+            target = _phi.reshape(next_psi.shape) + self.gamma *masks * next_psi
 
+        # compute psi loss
+        psi_loss = F.mse_loss(current_psi, target)
+
+        # compute phi loss
+        if self.phi_net != None:
+            pass
+        else:
+            phi_loss = None
+
+        # compute w_loss
+        predicted_rewards = torch.matmul(_phi,self.estimated_w.unsqueeze(1))
+        rewards = rewards.reshape(T-1, B, -1).reshape(-1,1)
+        predicted_rewards = predicted_rewards.reshape(-1,1)
+        w_loss = F.mse_loss(predicted_rewards, rewards)
+
+        return psi_loss, phi_loss, w_loss
 
 
 class NNBase(nn.Module):
@@ -225,9 +282,10 @@ class Print(nn.Module):
 
 
 class CNNBase(NNBase):
-    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=128):
+    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=128, SF=False, num_actions = 3):
         super(CNNBase, self).__init__(recurrent, hidden_size + feature_size, hidden_size, feature_size)
         self.feature_size = feature_size
+        self.SF = SF
 
         init_ = lambda m: init(m,
             nn.init.orthogonal_,
@@ -260,9 +318,11 @@ class CNNBase(NNBase):
         init_ = lambda m: init(m,
             nn.init.orthogonal_,
             lambda x: nn.init.constant_(x, 0))
+        if SF:
+            self.critic_linear = init_(nn.Linear(hidden_size + feature_size, feature_size*num_actions))
+        else:
 
-        self.critic_linear = init_(nn.Linear(hidden_size + feature_size, 1))
-
+            self.critic_linear = init_(nn.Linear(hidden_size + feature_size, 1))
         self.train()
 
     def forward(self, inputs, rnn_hxs, masks, features = None):
@@ -284,9 +344,9 @@ class CNNBase(NNBase):
 
 
 class MLPBase(NNBase):
-    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=64):
+    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=64, SF=False, num_actions = 3):
         super(MLPBase, self).__init__(recurrent, num_inputs + feature_size, hidden_size, feature_size = 2)
-
+        self.SF = SF
         if recurrent:
             num_inputs = hidden_size
 
@@ -308,7 +368,11 @@ class MLPBase(NNBase):
             nn.Tanh()
         )
 
-        self.critic_linear = init_(nn.Linear(hidden_size + feature_size, 1))
+        if SF:
+
+            self.critic_linear = init_(nn.Linear(hidden_size + feature_size, feature_size*num_actions))
+        else:
+            self.critic_linear = init_(nn.Linear(hidden_size + feature_size, 1))
 
         self.train()
 
