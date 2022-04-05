@@ -157,7 +157,6 @@ def main():
                                 actions = action, rewards = reward, masks = masks,
                                 feature = feature)
 
-
             psi_loss, phi_loss, w_loss = agent.update(rollouts)
 
             rollouts.after_update()
@@ -495,9 +494,9 @@ def main():
                 wandb.log({"mean_reward": np.mean(episode_rewards),
                            "success_rate": np.count_nonzero(np.greater(episode_rewards, 0)) / len(episode_rewards),
                            "num_updates": j,
-                           "value_loss": float(value_loss.item()),
-                           "action_loss": float(action_loss.item()),
-                           "dist_entropy": float(dist_entropy.item())
+                           "value_loss": float(value_loss),
+                           "action_loss": float(action_loss),
+                           "dist_entropy": float(dist_entropy)
                            }, step = total_num_steps)
 
             if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:

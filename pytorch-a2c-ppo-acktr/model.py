@@ -343,7 +343,7 @@ class NNBase(nn.Module):
 
     @property
     def output_size(self):
-        return self._hidden_size + self._feature_size
+        return self._hidden_size
 
     def _forward_gru(self, x, hxs, masks):
         if x.size(0) == hxs.size(0):
@@ -384,7 +384,10 @@ class Print(nn.Module):
 
 class CNNBase(NNBase):
     def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=128, SF=False, Q=False, num_actions = 3):
-        super(CNNBase, self).__init__(recurrent, hidden_size + feature_size, hidden_size + feature_size, feature_size)
+        if SF:
+            super(CNNBase, self).__init__(recurrent, hidden_size + feature_size, hidden_size + feature_size, feature_size)
+        else:
+            super(CNNBase, self).__init__(recurrent, hidden_size + feature_size, hidden_size + feature_size, feature_size)
         self.feature_size = feature_size
         self.SF = SF
         self.Q = Q
