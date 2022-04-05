@@ -1,4 +1,5 @@
 import argparse
+from distutils.util import strtobool
 
 import torch
 
@@ -57,7 +58,8 @@ def get_args():
                         help='disables CUDA training')
     parser.add_argument('--add-timestep', action='store_true', default=False,
                         help='add timestep to observations')
-    parser.add_argument('--recurrent-policy', action='store_true', default=False,
+    parser.add_argument('--recurrent-policy', default=False,
+                        type = lambda x: bool(strtobool(x)),
                         help='use a recurrent policy')
     parser.add_argument('--vis', action='store_true', default=False,
                         help='enable visdom visualization')
