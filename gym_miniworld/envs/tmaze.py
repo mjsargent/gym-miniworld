@@ -198,7 +198,7 @@ class TMazeTwoBoxDynamic(MiniWorldEnv):
         return obs
 
 
-class TMazeTwoBoxDynamicFeatures(MiniWorldEnv):
+class TMazeTwoBoxDynamicFeatures100K(MiniWorldEnv):
     """
     Two hallways connected in a T-junction - two boxes of different colours
     are used. Both boxes are terminal and have different rewards. The
@@ -206,12 +206,351 @@ class TMazeTwoBoxDynamicFeatures(MiniWorldEnv):
 
     This environment outputs a dict as its observation, with a feature
     detailing the information about the goals
+
+    The reward does not switch location in this debug env
     """
 
     def __init__(
         self,
         goal_pos=None,
-        sub_task_length = 500000000,
+        sub_task_length = 100000,
+        **kwargs
+    ):
+        self.goal_pos = goal_pos
+
+        self.task_step_count = 0
+
+        self.sub_task_length = sub_task_length
+
+        # current goal = 0 or 1: used to index the goals list
+        self.goal_box_idx = 0
+        self.penalty_box_idx = 1
+
+        super().__init__(
+            max_episode_steps=280,
+            **kwargs
+        )
+
+        # Allow only movement actions (left/right/forward)
+        self.action_space = spaces.Discrete(self.actions.move_forward+1)
+        self.feature_dim = 2
+
+    def _gen_world(self):
+        room1 = self.add_rect_room(
+            min_x=-1, max_x=8,
+            min_z=-2, max_z=2
+        )
+        room2 = self.add_rect_room(
+            min_x=8, max_x=12,
+            min_z=-8, max_z=8
+        )
+        self.connect_rooms(room1, room2, min_z=-2, max_z=2)
+
+        # Add two boxes of different colours
+
+        self.red_box = Box(color='red')
+        self.blue_box = Box(color='blue')
+        self.boxes = [self.red_box, self.blue_box]
+
+        # Place boxes in the left and right arm - their locations are static
+
+        self.place_entity(
+            self.red_box,
+            min_x=10,
+            max_x=10,
+            min_z=-6,
+            max_z=-6,
+            )
+        self.place_entity(
+            self.blue_box,
+            min_x=10,
+            max_x=10,
+            min_z=6,
+            max_z=6,
+            )
+
+        # Choose a random room and position to spawn at
+        self.place_agent(
+            dir=self.rand.float(-math.pi/4, math.pi/4),
+            room=room1
+        )
+
+    def step(self, action):
+        obs, reward, done, info = super().step(action)
+        feature = np.zeros(2)
+
+        if self.near(self.boxes[self.goal_box_idx]):
+            reward += self._reward()
+            done = True
+
+        if self.near(self.boxes[self.penalty_box_idx]):
+            reward += -1 * self._reward()
+            done = True
+
+        if self.near(self.blue_box):
+            feature[0] = 1
+
+        if self.near(self.red_box):
+            feature[1] = 1
+
+        info['goal_pos'] = self.boxes[self.goal_box_idx].pos
+        info['feature'] = feature
+
+        self.task_step_count += 1
+        return obs, reward, done, info
+
+    def reset(self):
+
+        if self.task_step_count > self.sub_task_length:
+            self.goal_box_idx = (self.goal_box_idx + 1) % 2
+            self.penalty_box_idx = (self.penalty_box_idx + 1) % 2
+            self.tesk_step_count = 0
+
+        obs = super().reset()
+        return obs
+
+
+class TMazeTwoBoxDynamicFeatures1M(MiniWorldEnv):
+    """
+    Two hallways connected in a T-junction - two boxes of different colours
+    are used. Both boxes are terminal and have different rewards. The
+    reward associated with each box alternates with a given frequency
+
+    This environment outputs a dict as its observation, with a feature
+    detailing the information about the goals
+
+    The reward does not switch location in this debug env
+    """
+
+    def __init__(
+        self,
+        goal_pos=None,
+        sub_task_length = 1000000,
+        **kwargs
+    ):
+        self.goal_pos = goal_pos
+
+        self.task_step_count = 0
+
+        self.sub_task_length = sub_task_length
+
+        # current goal = 0 or 1: used to index the goals list
+        self.goal_box_idx = 0
+        self.penalty_box_idx = 1
+
+        super().__init__(
+            max_episode_steps=280,
+            **kwargs
+        )
+
+        # Allow only movement actions (left/right/forward)
+        self.action_space = spaces.Discrete(self.actions.move_forward+1)
+        self.feature_dim = 2
+
+    def _gen_world(self):
+        room1 = self.add_rect_room(
+            min_x=-1, max_x=8,
+            min_z=-2, max_z=2
+        )
+        room2 = self.add_rect_room(
+            min_x=8, max_x=12,
+            min_z=-8, max_z=8
+        )
+        self.connect_rooms(room1, room2, min_z=-2, max_z=2)
+
+        # Add two boxes of different colours
+
+        self.red_box = Box(color='red')
+        self.blue_box = Box(color='blue')
+        self.boxes = [self.red_box, self.blue_box]
+
+        # Place boxes in the left and right arm - their locations are static
+
+        self.place_entity(
+            self.red_box,
+            min_x=10,
+            max_x=10,
+            min_z=-6,
+            max_z=-6,
+            )
+        self.place_entity(
+            self.blue_box,
+            min_x=10,
+            max_x=10,
+            min_z=6,
+            max_z=6,
+            )
+
+        # Choose a random room and position to spawn at
+        self.place_agent(
+            dir=self.rand.float(-math.pi/4, math.pi/4),
+            room=room1
+        )
+
+    def step(self, action):
+        obs, reward, done, info = super().step(action)
+        feature = np.zeros(2)
+
+        if self.near(self.boxes[self.goal_box_idx]):
+            reward += self._reward()
+            done = True
+
+        if self.near(self.boxes[self.penalty_box_idx]):
+            reward += -1 * self._reward()
+            done = True
+
+        if self.near(self.blue_box):
+            feature[0] = 1
+
+        if self.near(self.red_box):
+            feature[1] = 1
+
+        info['goal_pos'] = self.boxes[self.goal_box_idx].pos
+        info['feature'] = feature
+
+        self.task_step_count += 1
+        return obs, reward, done, info
+
+    def reset(self):
+
+        if self.task_step_count > self.sub_task_length:
+            self.goal_box_idx = (self.goal_box_idx + 1) % 2
+            self.penalty_box_idx = (self.penalty_box_idx + 1) % 2
+            self.tesk_step_count = 0
+
+        obs = super().reset()
+        return obs
+
+
+class TMazeTwoBoxDynamicFeatures10M(MiniWorldEnv):
+    """
+    Two hallways connected in a T-junction - two boxes of different colours
+    are used. Both boxes are terminal and have different rewards. The
+    reward associated with each box alternates with a given frequency
+
+    This environment outputs a dict as its observation, with a feature
+    detailing the information about the goals
+
+    The reward does not switch location in this debug env
+    """
+
+    def __init__(
+        self,
+        goal_pos=None,
+        sub_task_length = 10000000,
+        **kwargs
+    ):
+        self.goal_pos = goal_pos
+
+        self.task_step_count = 0
+
+        self.sub_task_length = sub_task_length
+
+        # current goal = 0 or 1: used to index the goals list
+        self.goal_box_idx = 0
+        self.penalty_box_idx = 1
+
+        super().__init__(
+            max_episode_steps=280,
+            **kwargs
+        )
+
+        # Allow only movement actions (left/right/forward)
+        self.action_space = spaces.Discrete(self.actions.move_forward+1)
+        self.feature_dim = 2
+
+    def _gen_world(self):
+        room1 = self.add_rect_room(
+            min_x=-1, max_x=8,
+            min_z=-2, max_z=2
+        )
+        room2 = self.add_rect_room(
+            min_x=8, max_x=12,
+            min_z=-8, max_z=8
+        )
+        self.connect_rooms(room1, room2, min_z=-2, max_z=2)
+
+        # Add two boxes of different colours
+
+        self.red_box = Box(color='red')
+        self.blue_box = Box(color='blue')
+        self.boxes = [self.red_box, self.blue_box]
+
+        # Place boxes in the left and right arm - their locations are static
+
+        self.place_entity(
+            self.red_box,
+            min_x=10,
+            max_x=10,
+            min_z=-6,
+            max_z=-6,
+            )
+        self.place_entity(
+            self.blue_box,
+            min_x=10,
+            max_x=10,
+            min_z=6,
+            max_z=6,
+            )
+
+        # Choose a random room and position to spawn at
+        self.place_agent(
+            dir=self.rand.float(-math.pi/4, math.pi/4),
+            room=room1
+        )
+
+    def step(self, action):
+        obs, reward, done, info = super().step(action)
+        feature = np.zeros(2)
+
+        if self.near(self.boxes[self.goal_box_idx]):
+            reward += self._reward()
+            done = True
+
+        if self.near(self.boxes[self.penalty_box_idx]):
+            reward += -1 * self._reward()
+            done = True
+
+        if self.near(self.blue_box):
+            feature[0] = 1
+
+        if self.near(self.red_box):
+            feature[1] = 1
+
+        info['goal_pos'] = self.boxes[self.goal_box_idx].pos
+        info['feature'] = feature
+
+        self.task_step_count += 1
+        return obs, reward, done, info
+
+    def reset(self):
+
+        if self.task_step_count > self.sub_task_length:
+            self.goal_box_idx = (self.goal_box_idx + 1) % 2
+            self.penalty_box_idx = (self.penalty_box_idx + 1) % 2
+            self.tesk_step_count = 0
+
+        obs = super().reset()
+        return obs
+
+
+
+class TMazeTwoBoxDynamicFeaturesDebug(MiniWorldEnv):
+    """
+    Two hallways connected in a T-junction - two boxes of different colours
+    are used. Both boxes are terminal and have different rewards. The
+    reward associated with each box alternates with a given frequency
+
+    This environment outputs a dict as its observation, with a feature
+    detailing the information about the goals
+
+    The reward does not switch location in this debug env
+    """
+
+    def __init__(
+        self,
+        goal_pos=None,
+        sub_task_length = 9000000000000, # should never switch
         **kwargs
     ):
         self.goal_pos = goal_pos

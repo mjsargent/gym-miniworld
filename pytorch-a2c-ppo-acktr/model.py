@@ -72,6 +72,107 @@ class Policy(nn.Module):
 
         return value, action_log_probs, dist_entropy, rnn_hxs
 
+class QPolicy(nn.Module):
+    def __init__(self, obs_shape, action_space, feature_size, use_target_network = False, eps = 0.05, gamma = 0.99, base_kwargs=None):
+        super(QPolicy, self).__init__()
+        if base_kwargs is None:
+            base_kwargs = {}
+
+        self.gamma = gamma
+        self.eps = eps
+        self.use_target_network = use_target_network
+        self.feature_size =feature_size
+
+        if action_space.__class__.__name__ == "Discrete":
+            self.num_actions = action_space.n
+
+        if len(obs_shape) == 3:
+            self.q_net = CNNBase(obs_shape[0], feature_size, Q=True,num_actions=action_space.n, **base_kwargs)
+            if use_target_network:
+                self.target_q_net = CNNBase(obs_shape[0], feature_size,Q=True, num_actions=action_space.n, **base_kwargs)
+                self.target_q_net.load_state_dict(self.q_net.state_dict())
+
+        elif len(obs_shape) == 1:
+            self.q_net = MLPBase(obs_shape[0], feature_size,num_actions=action_space.n, Q=True, **base_kwargs)
+            if use_target_network:
+                self.target_q_net = MLPBase(obs_shape[0], feature_size, Q=True,num_actions=action_space.n, **base_kwargs)
+                self.target_q_net.load_state_dict(self.q_net.state_dict())
+        else:
+            raise NotImplementedError
+
+        #if action_space.__class__.__name__ == "Discrete":
+        #    num_outputs = action_space.n
+        #    self.dist = Categorical(self.psi_net.output_size, num_outputs)
+        #elif action_space.__class__.__name__ == "Box":
+        #    num_outputs = action_space.shape[0]
+        #    self.dist = DiagGaussian(self.psi_net.output_size, num_outputs)
+        #else:
+        #    raise NotImplementedError
+
+    @property
+    def is_recurrent(self):
+        return self.q_net.is_recurrent
+
+    @property
+    def recurrent_hidden_state_size(self):
+        """Size of rnn_hx."""
+        return self.q_net.recurrent_hidden_state_size
+
+    def forward(self, inputs, rnn_hxs, masks, features = None):
+        raise NotImplementedError
+
+    def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
+        # return q values
+        # psi: NXB, A*|phi|
+        q,  rnn_hxs = self.q_net(inputs, rnn_hxs, masks, features)
+        q = q.reshape(-1,self.num_actions)
+        if deterministic:
+            r = torch.rand(q.shape[0]).to(q.device)
+            action = torch.where(r < self.eps, torch.randint(q.shape[1], (q.shape[0])).to(self.q_net.device), torch.argmax(q, dim = -1))
+        else:
+            action = torch.argmax(q, dim = -1, keepdims = True)
+
+        return q, action, None, rnn_hxs
+
+    def get_value(self, inputs, rnn_hxs, masks, features = None):
+        # overloaded to mean q values
+        q, _ = self.q_net(inputs, rnn_hxs, masks, features)
+        return q
+
+    def evaluate_actions(self, inputs, rnn_hxs, masks, action, rewards, features = None, dims = None):
+        # hacky, but we need to know the rollout length and the batch size in
+        # order to align the states into t and t+1
+        T = dims[0]
+        B = dims[1]
+
+        q, rnn_hxs = self.q_net(inputs, rnn_hxs, masks, features)
+        q = q.reshape(T, B, -1)
+        s = inputs.reshape(T, B, -1)[:-1]
+        next_s = inputs.reshape(T, B, -1)[1:]
+
+        current_q = q[:-1].reshape((T-1)*B,-1)
+
+        if self.use_target_network:
+            with torch.no_grad():
+                # get t+1 of each input to the psi net
+                next_rnn_hxs = rnn_hxs.reshape(T, B, -1)[1:].reshape((T-1)*B, -1)
+                _ ,next_action, _, _ = self.target_q_net.act(next_s.reshape((T-1)*B, -1), rnn_hxs, features, deterministic = True)
+        else:
+            next_q = q[1:].clone().detach().reshape((T-1)*B,-1)
+            next_action = torch.argmax(next_q, -1)
+
+        # index with actions and best next actions
+        with torch.no_grad():
+            masks = masks.reshape(T, B, -1)
+            rewards = rewards.reshape(T-1, B, -1).reshape(-1,1)
+            masks = masks[1:].reshape((T-1)*B, -1).repeat(1, next_psi.shape[-1])
+            target =  rewards + self.gamma *masks * next_q
+
+        # compute psi loss
+        q_loss = F.mse_loss(current_q, target)
+
+        return q_loss
+
 
 class SFPolicy(nn.Module):
     def __init__(self, obs_shape, action_space, feature_size, learnt_phi = False, use_target_network = False, eps = 0.05, gamma = 0.99, base_kwargs=None):
@@ -282,10 +383,11 @@ class Print(nn.Module):
 
 
 class CNNBase(NNBase):
-    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=128, SF=False, num_actions = 3):
-        super(CNNBase, self).__init__(recurrent, hidden_size + feature_size, hidden_size, feature_size)
+    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=128, SF=False, Q=False, num_actions = 3):
+        super(CNNBase, self).__init__(recurrent, hidden_size + feature_size, hidden_size + feature_size, feature_size)
         self.feature_size = feature_size
         self.SF = SF
+        self.Q = Q
 
         init_ = lambda m: init(m,
             nn.init.orthogonal_,
@@ -320,8 +422,9 @@ class CNNBase(NNBase):
             lambda x: nn.init.constant_(x, 0))
         if SF:
             self.critic_linear = init_(nn.Linear(hidden_size + feature_size, feature_size*num_actions))
+        elif Q:
+            self.critic_linear = init_(nn.Linear(hidden_size + feature_size, num_actions))
         else:
-
             self.critic_linear = init_(nn.Linear(hidden_size + feature_size, 1))
         self.train()
 
@@ -344,9 +447,10 @@ class CNNBase(NNBase):
 
 
 class MLPBase(NNBase):
-    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=64, SF=False, num_actions = 3):
+    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=64, SF=False,Q=False, num_actions = 3):
         super(MLPBase, self).__init__(recurrent, num_inputs + feature_size, hidden_size, feature_size = 2)
         self.SF = SF
+        self.Q = Q
         if recurrent:
             num_inputs = hidden_size
 
@@ -369,8 +473,9 @@ class MLPBase(NNBase):
         )
 
         if SF:
-
             self.critic_linear = init_(nn.Linear(hidden_size + feature_size, feature_size*num_actions))
+        elif Q:
+            self.critic_linear = init_(nn.Linear(hidden_size + feature_size, num_actions))
         else:
             self.critic_linear = init_(nn.Linear(hidden_size + feature_size, 1))
 
