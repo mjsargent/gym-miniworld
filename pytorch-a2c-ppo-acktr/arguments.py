@@ -52,7 +52,7 @@ def get_args():
                         help='environment to train on (default: PongNoFrameskip-v4)')
     parser.add_argument('--log_dir', default='/tmp/gym/',
                         help='directory to save agent logs (default: /tmp/gym)')
-    parser.add_argument('--save-_ir', default='./trained_models/',
+    parser.add_argument('--save_dir', default='./trained_models/',
                         help='directory to save agent logs (default: ./trained_models/)')
     parser.add_argument('--no_cuda', action='store_true', default=False,
                         help='disables CUDA training')
