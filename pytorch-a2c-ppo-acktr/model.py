@@ -124,7 +124,7 @@ class QPolicy(nn.Module):
     def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
         # return q values
         # psi: NXB, A*|phi|
-        q,  rnn_hxs = self.q_net(inputs, rnn_hxs, masks, features)
+        q, _,  rnn_hxs = self.q_net(inputs, rnn_hxs, masks, features)
         q = q.reshape(-1,self.num_actions)
         if deterministic:
             r = torch.rand(q.shape[0]).to(q.device)
@@ -145,7 +145,10 @@ class QPolicy(nn.Module):
         T = dims[0]
         B = dims[1]
 
-        q, rnn_hxs = self.q_net(inputs, rnn_hxs, masks, features)
+        first_rnn_hxs = rnn_hxs.reshape(T,B, -1)[0]
+        second_rnn_hxs = rnn_hxs.reshape(T,B, -1)[1]
+
+        q, _, _  = self.q_net(inputs, first_rnn_hxs, masks, features)
         q = q.reshape(T, B, -1)
         s = inputs.reshape(T, B, -1)[:-1]
         next_s = inputs.reshape(T, B, -1)[1:]
@@ -155,8 +158,8 @@ class QPolicy(nn.Module):
         if self.use_target_network:
             with torch.no_grad():
                 # get t+1 of each input to the psi net
-                next_rnn_hxs = rnn_hxs.reshape(T, B, -1)[1:].reshape((T-1)*B, -1)
-                _ ,next_action, _, _ = self.target_q_net.act(next_s.reshape((T-1)*B, -1), rnn_hxs, features, deterministic = True)
+                #next_rnn_hxs = rnn_hxs.reshape(T, B, -1)[1:].reshape((T-1)*B, -1)
+                _ ,next_action, _, _ = self.target_q_net.act(next_s.reshape((T-1)*B, -1), second_rnn_hxs, features, deterministic = True)
         else:
             next_q = q[1:].clone().detach().reshape((T-1)*B,-1)
             next_action = torch.argmax(next_q, -1)
@@ -165,7 +168,7 @@ class QPolicy(nn.Module):
         with torch.no_grad():
             masks = masks.reshape(T, B, -1)
             rewards = rewards.reshape(T-1, B, -1).reshape(-1,1)
-            masks = masks[1:].reshape((T-1)*B, -1).repeat(1, next_psi.shape[-1])
+            masks = masks[1:].reshape((T-1)*B, -1).repeat(1, next_q.shape[-1])
             target =  rewards + self.gamma *masks * next_q
 
         # compute psi loss
@@ -389,6 +392,8 @@ class Print(nn.Module):
 class CNNBase(NNBase):
     def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=128, SF=False, Q=False, num_actions = 3):
         if SF:
+            # SF does not need the current feature appended to its
+            # representations as it is learning in predict them
             super(CNNBase, self).__init__(recurrent, hidden_size + feature_size, hidden_size + feature_size, feature_size)
         else:
             super(CNNBase, self).__init__(recurrent, hidden_size + feature_size, hidden_size + feature_size, feature_size)

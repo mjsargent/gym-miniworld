@@ -28,7 +28,7 @@ class QLearning():
         dims = [num_steps+1, num_processes]
         q_loss = self.policy.evaluate_actions(
             rollouts.obs.view(-1, *obs_shape),
-            rollouts.recurrent_hidden_states[0].view(-1, self.policy.recurrent_hidden_state_size),
+            rollouts.recurrent_hidden_states.view(-1, self.policy.recurrent_hidden_state_size),
             rollouts.masks.view(-1, 1),
             rollouts.actions.view(-1, action_shape),
             rollouts.rewards.view(-1, 1),

@@ -99,7 +99,7 @@ def main():
                         phi_lr=3e-4, psi_lr=3e-4, eps=args.eps_explore)
     elif args.algo == 'q':
         agent = algo.QLearning(policy, feature_size = feature_size,
-                        phi_lr=3e-4, psi_lr=3e-4, eps=args.eps_explore)
+                        lr=args.lr, eps=args.eps_explore)
 
     if args.algo == "sf" or args.algo == "q":
         rollouts = RolloutStorage(args.num_steps, args.num_processes,
