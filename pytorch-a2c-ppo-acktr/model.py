@@ -259,7 +259,11 @@ class SFPolicy(nn.Module):
         T = dims[0]
         B = dims[1]
 
-        psi, _ , rnn_hxs = self.psi_net(inputs, rnn_hxs, masks, features)
+        # give the fist rnn_hxs and rollout the rest
+        first_rnn_hxs = rnn_hxs.reshape(T,B, -1)[0]
+        second_rnn_hxs = rnn_hxs.reshape(T,B, -1)[1]
+
+        psi, _ , rnn_hxs = self.psi_net(inputs, first_rnn_hxs, masks, features)
         psi = psi.reshape(T, B, -1)
 
         s = inputs.reshape(T, B, -1)[:-1]
@@ -274,10 +278,10 @@ class SFPolicy(nn.Module):
             # as far as I can tell. VISR does use one.
             with torch.no_grad():
                 # get t+1 of each input to the psi net
-                next_rnn_hxs = rnn_hxs.reshape(T, B, -1)[1:].reshape((T-1)*B, -1)
+                #next_rnn_hxs = rnn_hxs.reshape(T, B, -1)[1:].reshape((T-1)*B, -1)
                 next_features= _phi.reshape((T-1)*B, B, -1)
 
-                _ ,next_action, next_psi, _, _ = self.target_psi_net.act(next_s.reshape((T-1)*B, -1), rnn_hxs, features, deterministic = True)
+                _ ,next_action, next_psi, _, _ = self.target_psi_net.act(next_s.reshape((T-1)*B, -1), second_rnn_hxs, features, deterministic = True)
 
             next_psi = next_psi.clone().detach().reshape((T-1)*B,self.num_actions,-1)
         else:
