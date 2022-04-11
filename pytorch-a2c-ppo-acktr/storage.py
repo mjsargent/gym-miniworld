@@ -15,6 +15,11 @@ class RolloutStorage(object):
         self.returns = torch.zeros(num_steps + 1, num_processes, 1)
         self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
         self.features = torch.zeros(num_steps + 1 , num_processes, feature_dim)
+
+        # psi has dim feature dim not feature_dim * num_actions as it is used
+        # for the policy gradient version of the algorithm not the value based
+        self.psis = torch.zeros(num_steps, num_processes, feature_dim)
+        self.estimated_rewards = torch.zeros(num_steps, num_processes, 1)
         if action_space.__class__.__name__ == 'Discrete':
             action_shape = 1
         else:
@@ -37,8 +42,10 @@ class RolloutStorage(object):
         self.actions = self.actions.to(device)
         self.masks = self.masks.to(device)
         self.features = self.features.to(device)
+        self.psis = self.psis.to(device)
+        self.estimated_rewards = self.estimated_rewards.to(device)
 
-    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, feature):
+    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, feature, psi, estimated_reward):
         self.obs[self.step + 1].copy_(obs)
         self.recurrent_hidden_states[self.step + 1].copy_(recurrent_hidden_states)
         self.actions[self.step].copy_(actions)
@@ -49,7 +56,10 @@ class RolloutStorage(object):
         self.rewards[self.step].copy_(rewards)
         self.masks[self.step + 1].copy_(masks)
         self.features[self.step + 1].copy_(feature)
-
+        if psi != None:
+            self.psis[self.step].copy_(psi)
+        if estimated_reward != None:
+            self.estimated_reward[self.step].copy_(estimated_reward)
         self.step = (self.step + 1) % self.num_steps
 
     def after_update(self):
@@ -59,7 +69,7 @@ class RolloutStorage(object):
         # TODO double check if this is needed
         self.features[0].copy_(self.features[-1])
 
-    def compute_returns(self, next_value, use_gae, gamma, tau):
+    def compute_returns(self, next_value, use_gae, gamma, tau, sf = False):
         if use_gae:
             self.value_preds[-1] = next_value
             gae = 0
@@ -69,10 +79,17 @@ class RolloutStorage(object):
                 self.returns[step] = gae + self.value_preds[step]
         else:
             self.returns[-1] = next_value
-            for step in reversed(range(self.rewards.size(0))):
-                self.returns[step] = self.returns[step + 1] * \
-                    gamma * self.masks[step + 1] + self.rewards[step]
+            if sf:
+                for step in reversed(range(self.estimated_rewards.size(0))):
+                    self.returns[step] = self.returns[step + 1] * \
+                        gamma * self.masks[step + 1] + self.estimated_rewards[step]
+            else:
+                for step in reversed(range(self.rewards.size(0))):
+                    self.returns[step] = self.returns[step + 1] * \
+                        gamma * self.masks[step + 1] + self.rewards[step]
 
+        # function to use if computing the returns where the critic is
+        # based on a successor feature
 
     def feed_forward_generator(self, advantages, num_mini_batch):
         num_steps, num_processes = self.rewards.size()[0:2]

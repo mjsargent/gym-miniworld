@@ -72,6 +72,73 @@ class Policy(nn.Module):
 
         return value, action_log_probs, dist_entropy, rnn_hxs
 
+class SFConditionedPolicy(nn.Module):
+    def __init__(self, obs_shape, action_space, feature_size, base_kwargs=None):
+        super(SFConditionedPolicy, self).__init__()
+        if base_kwargs is None:
+            base_kwargs = {}
+
+        if len(obs_shape) == 3:
+            self.base = CNNSFBase(obs_shape[0], feature_size, **base_kwargs)
+
+        elif len(obs_shape) == 1:
+            self.base = MLPSFBase(obs_shape[0], feature_size, **base_kwargs)
+        else:
+            raise NotImplementedError
+
+        if action_space.__class__.__name__ == "Discrete":
+            num_outputs = action_space.n
+            self.dist = Categorical(self.base.output_size + feature_size, num_outputs)
+
+        elif action_space.__class__.__name__ == "Box":
+            num_outputs = action_space.shape[0]
+            self.dist = DiagGaussian(self.base.output_size + feature_size, num_outputs)
+        else:
+            raise NotImplementedError
+
+    @property
+    def is_recurrent(self):
+        return self.base.is_recurrent
+
+    @property
+    def recurrent_hidden_state_size(self):
+        """Size of rnn_hx."""
+        return self.base.recurrent_hidden_state_size
+
+    def forward(self, inputs, rnn_hxs, masks, features = None):
+        raise NotImplementedError
+
+    def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
+        value, actor_features, rnn_hxs, psi = self.base(inputs, rnn_hxs, masks, features)
+        dist = self.dist(actor_features)
+
+        if deterministic:
+            action = dist.mode()
+        else:
+            action = dist.sample()
+
+        action_log_probs = dist.log_probs(action)
+        dist_entropy = dist.entropy().mean()
+
+        return value, action, action_log_probs, rnn_hxs, psi
+
+    def get_value(self, inputs, rnn_hxs, masks, features = None):
+        value, _, _, _ = self.base(inputs, rnn_hxs, masks, features)
+        return value
+
+    def evaluate_actions(self, inputs, rnn_hxs, masks, action, features = None):
+        value, actor_features, rnn_hxs, psi = self.base(inputs, rnn_hxs, masks, features)
+        dist = self.dist(actor_features)
+
+        action_log_probs = dist.log_probs(action)
+        dist_entropy = dist.entropy().mean()
+
+        return value, action_log_probs, dist_entropy, rnn_hxs, psi
+
+    def evaluate_rewards(self, features):
+        predicted_rewards = torch.matmul(features, self.base.w.t())
+        return predicted_rewards
+
 class QPolicy(nn.Module):
     def __init__(self, obs_shape, action_space, feature_size, use_target_network = False, eps = 0.05, gamma = 0.99, base_kwargs=None):
         super(QPolicy, self).__init__()
@@ -401,6 +468,7 @@ class CNNBase(NNBase):
         self.SF = SF
         self.Q = Q
 
+
         init_ = lambda m: init(m,
             nn.init.orthogonal_,
             lambda x: nn.init.constant_(x, 0),
@@ -456,6 +524,78 @@ class CNNBase(NNBase):
             x, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)
 
         return self.critic_linear(x), x, rnn_hxs
+
+class CNNSFBase(NNBase):
+    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=128, num_actions = 3):
+        super(CNNSFBase, self).__init__(recurrent, hidden_size, hidden_size, feature_size)
+        self.feature_size = feature_size
+
+        init_ = lambda m: init(m,
+            nn.init.orthogonal_,
+            lambda x: nn.init.constant_(x, 0),
+            nn.init.calculate_gain('relu'))
+
+        # overwrite output size
+        #@property
+        #def output_size(self):
+        #    return self._hidden_size + feature_size
+
+        # For 80x60 input
+        self.main = nn.Sequential(
+            init_(nn.Conv2d(num_inputs, 32, kernel_size=5, stride=2)),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+
+            init_(nn.Conv2d(32, 32, kernel_size=5, stride=2)),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+
+            init_(nn.Conv2d(32, 32, kernel_size=4, stride=2)),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+
+            #Print(),
+            Flatten(),
+
+            #nn.Dropout(0.2),
+
+            init_(nn.Linear(32 * 7 * 5, hidden_size)),
+            nn.ReLU()
+        )
+
+        init_ = lambda m: init(m,
+            nn.init.orthogonal_,
+            lambda x: nn.init.constant_(x, 0))
+        # successor feature parameters
+
+        self.sf = nn.Sequential(init_(nn.Linear(hidden_size + feature_size, feature_size)),
+                                      nn.ReLU(),
+                                      init_(nn.Linear(feature_size,feature_size))
+                        )
+        self.w = nn.Parameter(torch.randn(1, feature_size))
+
+        self.train()
+
+    def forward(self, inputs, rnn_hxs, masks, features = None):
+        #print(inputs.size())
+
+        x = inputs / 255.0
+        #print(x.size())
+
+        x = self.main(x)
+        #print(x.size())
+
+        if self.is_recurrent:
+            x, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)
+
+        # x is still the policy dist features
+        x = torch.cat([x, self.w.clone().detach().repeat(x.shape[0], 1)], axis = -1)
+
+        psi = self.sf(x)
+        critic_value = torch.matmul(psi, self.w.t())
+
+        return critic_value, x, rnn_hxs, psi
+
 
 
 class MLPBase(NNBase):
