@@ -15,7 +15,8 @@ class A2C_ACKTR():
                  eps=None,
                  alpha=None,
                  max_grad_norm=None,
-                 acktr=False):
+                 acktr=False,
+                 ):
 
         self.actor_critic = actor_critic
         self.acktr = acktr

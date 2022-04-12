@@ -123,8 +123,8 @@ class SFConditionedPolicy(nn.Module):
         return value, action, action_log_probs, rnn_hxs, psi
 
     def get_value(self, inputs, rnn_hxs, masks, features = None):
-        value, _, _, _ = self.base(inputs, rnn_hxs, masks, features)
-        return value
+        value, _, _, psi = self.base(inputs, rnn_hxs, masks, features)
+        return value, psi
 
     def evaluate_actions(self, inputs, rnn_hxs, masks, action, features = None):
         value, actor_features, rnn_hxs, psi = self.base(inputs, rnn_hxs, masks, features)
@@ -569,10 +569,12 @@ class CNNSFBase(NNBase):
         # successor feature parameters
 
         self.sf = nn.Sequential(init_(nn.Linear(hidden_size + feature_size, feature_size)),
-                                      nn.ReLU(),
+                                      nn.LeakyReLU(),
                                       init_(nn.Linear(feature_size,feature_size))
                         )
-        self.w = nn.Parameter(torch.randn(1, feature_size))
+        #self.w = nn.Parameter(torch.zeros(1, feature_size))
+        self.w = nn.Parameter(torch.FloatTensor([[-1,1]]))
+        #self.w = torch.tensor([-1, 1]).to(self.sf.device())
 
         self.train()
 
@@ -589,7 +591,8 @@ class CNNSFBase(NNBase):
             x, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)
 
         # x is still the policy dist features
-        x = torch.cat([x, self.w.clone().detach().repeat(x.shape[0], 1)], axis = -1)
+
+        x = torch.cat([x, self.w.repeat(x.shape[0], 1)], axis = -1)
 
         psi = self.sf(x)
         critic_value = torch.matmul(psi, self.w.t())

@@ -115,14 +115,18 @@ def main():
         agent = algo.QLearning(policy, feature_size = feature_size,
                         lr=args.lr, eps=args.eps_explore)
 
+    use_a2csf_storage = True if args.algo == "a2csf" else False
+
     if args.algo == "sf" or args.algo == "q":
         rollouts = RolloutStorage(args.num_steps, args.num_processes,
                         envs.observation_space.shape, envs.action_space,
                         policy.recurrent_hidden_state_size, feature_dim = feature_size)
+
     else:
         rollouts = RolloutStorage(args.num_steps, args.num_processes,
                         envs.observation_space.shape, envs.action_space,
-                        actor_critic.recurrent_hidden_state_size, feature_dim = feature_size)
+                        actor_critic.recurrent_hidden_state_size, feature_dim = feature_size,
+                                  a2csf = use_a2csf_storage)
 
 
     obs = envs.reset()
@@ -456,12 +460,14 @@ def main():
                 rollouts.insert(obs, recurrent_hidden_states, action, action_log_prob, value, reward, masks, feature, psi, estimated_reward)
 
             with torch.no_grad():
-                next_value = actor_critic.get_value(rollouts.obs[-1],
+                next_value, next_psi = actor_critic.get_value(rollouts.obs[-1],
                                                     rollouts.recurrent_hidden_states[-1],
                                                     rollouts.masks[-1],
-                                                    rollouts.features[-1]).detach()
+                                                    rollouts.features[-1])
+
 
             rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.tau, sf = True)
+            rollouts.compute_psi_returns(next_psi,args.gamma)
 
             value_loss, action_loss, dist_entropy, psi_loss, w_loss = agent.update(rollouts)
 
@@ -511,6 +517,8 @@ def main():
                            "psi_loss": float(psi_loss),
                            "w_loss": float(w_loss)
                            }, step = total_num_steps)
+
+
 
             if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
                 eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,

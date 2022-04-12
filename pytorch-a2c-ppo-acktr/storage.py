@@ -7,14 +7,19 @@ def _flatten_helper(T, N, _tensor):
 
 
 class RolloutStorage(object):
-    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size, feature_dim):
+    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size, feature_dim, a2csf = False):
+        self.a2csf = a2csf
         self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
         self.recurrent_hidden_states = torch.zeros(num_steps + 1, num_processes, recurrent_hidden_state_size)
         self.rewards = torch.zeros(num_steps, num_processes, 1)
         self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
         self.returns = torch.zeros(num_steps + 1, num_processes, 1)
+        self.psi_returns = torch.zeros(num_steps + 1, num_processes, feature_dim)
         self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
-        self.features = torch.zeros(num_steps + 1 , num_processes, feature_dim)
+        if self.a2csf:
+            self.features = torch.zeros(num_steps, num_processes, feature_dim)
+        else:
+            self.features = torch.zeros(num_steps + 1 , num_processes, feature_dim)
 
         # psi has dim feature dim not feature_dim * num_actions as it is used
         # for the policy gradient version of the algorithm not the value based
@@ -38,6 +43,7 @@ class RolloutStorage(object):
         self.rewards = self.rewards.to(device)
         self.value_preds = self.value_preds.to(device)
         self.returns = self.returns.to(device)
+        self.psi_returns = self.psi_returns.to(device)
         self.action_log_probs = self.action_log_probs.to(device)
         self.actions = self.actions.to(device)
         self.masks = self.masks.to(device)
@@ -55,11 +61,14 @@ class RolloutStorage(object):
             self.value_preds[self.step].copy_(value_preds)
         self.rewards[self.step].copy_(rewards)
         self.masks[self.step + 1].copy_(masks)
-        self.features[self.step + 1].copy_(feature)
+        if self.a2csf:
+            self.features[self.step].copy_(feature)
+        else:
+            self.features[self.step + 1].copy_(feature)
         if psi != None:
             self.psis[self.step].copy_(psi)
         if estimated_reward != None:
-            self.estimated_reward[self.step].copy_(estimated_reward)
+            self.estimated_rewards[self.step].copy_(estimated_reward)
         self.step = (self.step + 1) % self.num_steps
 
     def after_update(self):
@@ -67,7 +76,8 @@ class RolloutStorage(object):
         self.recurrent_hidden_states[0].copy_(self.recurrent_hidden_states[-1])
         self.masks[0].copy_(self.masks[-1])
         # TODO double check if this is needed
-        self.features[0].copy_(self.features[-1])
+        if not self.a2csf:
+            self.features[0].copy_(self.features[-1])
 
     def compute_returns(self, next_value, use_gae, gamma, tau, sf = False):
         if use_gae:
@@ -87,6 +97,12 @@ class RolloutStorage(object):
                 for step in reversed(range(self.rewards.size(0))):
                     self.returns[step] = self.returns[step + 1] * \
                         gamma * self.masks[step + 1] + self.rewards[step]
+
+    def compute_psi_returns(self, next_psi, gamma):
+        self.psi_returns[-1] = next_psi
+        for step in reversed(range(self.psis.size(0))):
+            self.psi_returns[step] = self.psi_returns[step + 1] * \
+                gamma * self.masks[step+1].repeat(1,self.psi_returns.shape[-1]) + self.features[step]
 
         # function to use if computing the returns where the critic is
         # based on a successor feature
