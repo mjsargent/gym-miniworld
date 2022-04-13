@@ -95,7 +95,7 @@ def main():
     elif args.algo == 'a2csf':
         agent = algo.A2C_SF(actor_critic, args.value_loss_coef,
                                args.entropy_coef, lr_psi=args.lr,
-                               lr_policy = args.lr, lr_w = 0.5,
+                               lr_policy = args.lr, lr_w = 1,
                                eps=args.eps, alpha=args.alpha,
                                max_grad_norm=args.max_grad_norm,
                                feature_size = 2, gamma=args.gamma)
@@ -603,7 +603,12 @@ def main():
                             rollouts.features[step])
 
                 # Obser reward and next obs
-                obs, reward, done, infos = envs.step(action)
+                if j > 5:
+                    env_mask = np.array([0, 1, 0, 0])
+                else:
+                    env_mask = np.array([0, 0, 0, 0])
+                obs, reward, done, infos = envs.step(action, env_mask)
+                print(obs[:,0,0,0])
 
                 # info is a tuple of dicts
                 _feature = []
@@ -627,7 +632,7 @@ def main():
 
                 # If done then clean the history of observations.
                 masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
-                rollouts.insert(obs, recurrent_hidden_states, action, action_log_prob, value, reward, masks, feature, psi = None, expected_reward = None)
+                rollouts.insert(obs, recurrent_hidden_states, action, action_log_prob, value, reward, masks, feature, psi = None, estimated_reward = None)
 
             with torch.no_grad():
                 next_value = actor_critic.get_value(rollouts.obs[-1],

@@ -119,9 +119,9 @@ class VecPyTorch(VecEnvWrapper):
         obs = torch.from_numpy(obs).float().to(self.device)
         return obs
 
-    def step_async(self, actions):
+    def step_async(self, actions, mask = None):
         actions = actions.squeeze(1).cpu().numpy()
-        self.venv.step_async(actions)
+        self.venv.step_async(actions, mask)
 
     def step_wait(self):
         obs, reward, done, info = self.venv.step_wait()

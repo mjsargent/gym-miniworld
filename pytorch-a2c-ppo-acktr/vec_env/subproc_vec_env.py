@@ -23,6 +23,12 @@ def worker(remote, parent_remote, env_fn_wrapper):
             break
         elif cmd == 'get_spaces':
             remote.send((env.observation_space, env.action_space))
+        elif cmd == 'dummy':
+            ob = env.render_obs().transpose(2,1,0)
+            reward = -99
+            done = False
+            info = {"feature": np.array([0,0])}
+            remote.send((ob, reward, done, info))
         else:
             raise NotImplementedError
 
@@ -49,9 +55,17 @@ class SubprocVecEnv(VecEnv):
         observation_space, action_space = self.remotes[0].recv()
         VecEnv.__init__(self, len(env_fns), observation_space, action_space)
 
-    def step_async(self, actions):
-        for remote, action in zip(self.remotes, actions):
-            remote.send(('step', action))
+    def step_async(self, actions, mask = None):
+        if not isinstance(mask, np.ndarray):
+            for remote, action in zip(self.remotes, actions):
+                remote.send(('step', action))
+        else:
+            for i, m in enumerate(mask):
+                if m == 0:
+                    self.remotes[i].send(('step', actions[i]))
+                else:
+                    self.remotes[i].send(('dummy', actions[i]))
+
         self.waiting = True
 
     def step_wait(self):

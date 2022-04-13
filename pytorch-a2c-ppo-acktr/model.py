@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 from distributions import Categorical, DiagGaussian
 from utils import init, init_normc_
 
@@ -572,8 +573,8 @@ class CNNSFBase(NNBase):
                                       nn.LeakyReLU(),
                                       init_(nn.Linear(feature_size,feature_size))
                         )
-        #self.w = nn.Parameter(torch.zeros(1, feature_size))
-        self.w = nn.Parameter(torch.FloatTensor([[-1,1]]))
+        self.w = nn.Parameter(torch.zeros(1, feature_size))
+        #self.w = nn.Parameter(torch.FloatTensor([[-1,1]]))
         #self.w = torch.tensor([-1, 1]).to(self.sf.device())
 
         self.train()
