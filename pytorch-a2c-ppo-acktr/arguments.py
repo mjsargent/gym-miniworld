@@ -66,6 +66,9 @@ def get_args():
     parser.add_argument('--port', type=int, default=8097,
                         help='port to run the server on (default: 8097)')
     parser.add_argument('--eps_explore', type = float, default = 0.15)
+    parser.add_argument('--max_repeat', type = int, default = 7,
+                        help='maximum number of repeats allowed under the repeat policy')
+
     args = parser.parse_args()
 
     args.cuda = not args.no_cuda and torch.cuda.is_available()
