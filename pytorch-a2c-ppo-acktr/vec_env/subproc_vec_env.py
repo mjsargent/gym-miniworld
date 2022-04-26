@@ -1,6 +1,7 @@
 import numpy as np
 from multiprocessing import Process, Pipe, set_start_method
 from vec_env import VecEnv, CloudpickleWrapper
+import copy
 
 def worker(remote, parent_remote, env_fn_wrapper):
     parent_remote.close()
@@ -12,6 +13,28 @@ def worker(remote, parent_remote, env_fn_wrapper):
             if done:
                 ob = env.reset()
             remote.send((ob, reward, done, info))
+
+        elif cmd == 'multi_step':
+            # keep track of the actual number of steps taken
+
+            steps_taken = 0
+            rewards = 0
+            action, repeat = data
+            repeat_counter = 0
+
+            while repeat_counter <= repeat:
+
+                ob, _rewards, done, info = env.step(action)
+                rewards += _rewards
+                steps_taken = steps_taken + 1
+                repeat_counter = repeat_counter + 1
+                if done:
+                    ob = env.reset()
+                    break
+
+            info['steps_taken'] = steps_taken
+            remote.send((ob, rewards, done, info))
+
         elif cmd == 'reset':
             ob = env.reset()
             remote.send(ob)
@@ -42,7 +65,7 @@ class SubprocVecEnv(VecEnv):
         self.closed = False
         nenvs = len(env_fns)
         self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(nenvs)])
-        set_start_method('forkserver')
+        #set_start_method('forkserver')
         self.ps = [Process(target=worker, args=(work_remote, remote, CloudpickleWrapper(env_fn)))
             for (work_remote, remote, env_fn) in zip(self.work_remotes, self.remotes, env_fns)]
         for p in self.ps:
@@ -55,17 +78,13 @@ class SubprocVecEnv(VecEnv):
         observation_space, action_space = self.remotes[0].recv()
         VecEnv.__init__(self, len(env_fns), observation_space, action_space)
 
-    def step_async(self, actions, mask = None):
-        if not isinstance(mask, np.ndarray):
+    def step_async(self, actions, repeats = None):
+        if not isinstance(repeats, np.ndarray):
             for remote, action in zip(self.remotes, actions):
                 remote.send(('step', action))
         else:
-            for i, m in enumerate(mask):
-                if m == 0:
-                    self.remotes[i].send(('step', actions[i]))
-                else:
-                    self.remotes[i].send(('dummy', actions[i]))
-
+            for remote, action, repeat in zip(self.remotes, actions, repeats):
+                remote.send(('multi_step', [action, repeat]))
         self.waiting = True
 
     def step_wait(self):

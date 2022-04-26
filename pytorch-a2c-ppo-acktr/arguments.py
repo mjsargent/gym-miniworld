@@ -68,6 +68,10 @@ def get_args():
     parser.add_argument('--eps_explore', type = float, default = 0.15)
     parser.add_argument('--max_repeat', type = int, default = 7,
                         help='maximum number of repeats allowed under the repeat policy')
+    parser.add_argument('--action_only_interval', type = float, default = 0.0,
+                        help = 'if using an initial interval  without repeats, how long \
+                                    the interval will be as a proportion of \
+                                    the total of number of episodes')
 
     args = parser.parse_args()
 

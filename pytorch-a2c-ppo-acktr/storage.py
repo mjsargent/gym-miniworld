@@ -184,138 +184,85 @@ class RolloutStorage(object):
 
 # use a different buffer for temporally extended algorithms -
 # does not include the ppo specific methods
-
 class TemporallyExtendedRolloutStorage(object):
-    def __init__(self, num_decisions, num_processes, obs_shape, action_space, recurrent_hidden_state_size, feature_dim, max_repeat, a2csf = False):
-        # define storage to be used in compute decision point advantage
-        self.a2csf = False
-        self.feature_dim = feature_dim
-        # we will have fixed batch size and rollout length - not strictly
-        # needed but would require some extra args to be passed later
-        self.num_decisions = num_decisions
-        self.num_processes = num_processes
-
-        self.obs = torch.zeros(num_decisions + 1, num_processes, *obs_shape)
-        self.recurrent_hidden_states = torch.zeros(num_decisions + 1, num_processes, recurrent_hidden_state_size)
-        self.rewards = torch.zeros(num_decisions, num_processes, 1)
-        self.returns = torch.zeros(num_decisions + 1, num_processes, 1)
-        self.psi_returns = torch.zeros(num_decisions + 1, num_processes, feature_dim)
-        self.action_log_probs = torch.zeros(num_decisions, num_processes, 1)
-        self.repeat_log_probs = torch.zeros(num_decisions, num_processes, 1)
-
-
-        # need to also keep track of the total number of env steps taken,
-        # as this is not longer just num_steps * num_processes
-        self.total_steps = 0
-
-        self.repeats = torch.zeros(num_processes, 1).long()
+    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size, feature_dim, a2csf = False):
+        self.a2csf = a2csf
+        self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
+        self.recurrent_hidden_states = torch.zeros(num_steps + 1, num_processes, recurrent_hidden_state_size)
+        self.rewards = torch.zeros(num_steps, num_processes, 1)
+        self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
+        self.returns = torch.zeros(num_steps + 1, num_processes, 1)
+        self.psi_returns = torch.zeros(num_steps + 1, num_processes, feature_dim)
+        self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
+        self.repeat_log_probs = torch.zeros(num_steps, num_processes, 1)
+        # define two variables related to action reps -
+        # one for keep tracking of what we output, and one for keeping
+        # track of the actual number of actions repeated for discounting
+        self.repeats = torch.zeros(num_steps, num_processes, 1).long()
+        self.steps_taken = torch.zeros(num_steps, num_processes, 1)
         if self.a2csf:
-            self.features = torch.zeros(num_decisions, num_processes, feature_dim)
+            self.psis =  torch.zeros(num_steps, num_processes, feature_dim)
+            self.features = torch.zeros(num_steps, num_processes, feature_dim)
         else:
-            self.features = torch.zeros(num_decisions + 1 , num_processes, feature_dim)
+            self.features = torch.zeros(num_steps + 1 , num_processes, feature_dim)
+
         # psi has dim feature dim not feature_dim * num_actions as it is used
-        # for the policy gradient version of the algorithm not the value based
-        self.psis = torch.zeros(num_decisions, num_processes, feature_dim)
-        self.estimated_rewards = torch.zeros(num_decisions, num_processes, 1)
+        # for the policy gradient version of the algorithm not the value based self.psis = torch.zeros(num_steps, num_processes, feature_dim)
+        self.estimated_rewards = torch.zeros(num_steps, num_processes, 1)
         if action_space.__class__.__name__ == 'Discrete':
             action_shape = 1
         else:
             action_shape = action_space.shape[0]
-        self.actions = torch.zeros(num_decisions, num_processes, action_shape)
-        self.prev_actions = torch.zeros(num_decisions, num_processes, action_shape)
+        self.actions = torch.zeros(num_steps, num_processes, action_shape)
         if action_space.__class__.__name__ == 'Discrete':
             self.actions = self.actions.long()
-            self.prev_actions = torch.zeros(num_decisions, num_processes, action_shape).long()
+        self.masks = torch.ones(num_steps + 1, num_processes, 1)
 
-        self.steps_taken = torch.ones(num_decisions, num_processes, 1).long()
-        self.masks = torch.ones(num_decisions + 1, num_processes, 1)
-
-        #self.num_steps = num_steps
-
-        # step becomes a tensor - one for each process
-        self.step = torch.zeros(num_processes).long()
-
-        #TODO define accmulation vectors for reward and features to act
-        # as temp buffers before being added to the main buffer
-        self.reward_acc = torch.zeros(num_processes, 1)
-        self.psi_acc = torch.zeros(num_processes, feature_dim)
-        # we need to keep track of the number of steps taken for discounting
-        # - we cannot use the repeats as this will be different to the steps
-        # taken if the episode ends during the action repeation
-        self.steps_taken_acc = torch.ones(num_processes, 1)
+        self.num_steps = num_steps
+        self.step = 0
 
     def to(self, device):
         self.obs = self.obs.to(device)
         self.recurrent_hidden_states = self.recurrent_hidden_states.to(device)
         self.rewards = self.rewards.to(device)
-        #self.value_preds = self.value_preds.to(device)
         self.returns = self.returns.to(device)
-        #self.psi_returns = self.psi_returns.to(device)
         self.action_log_probs = self.action_log_probs.to(device)
         self.repeat_log_probs = self.repeat_log_probs.to(device)
         self.actions = self.actions.to(device)
         self.masks = self.masks.to(device)
         self.features = self.features.to(device)
-        self.psis = self.psis.to(device)
-        self.estimated_rewards = self.estimated_rewards.to(device)
-        self.steps_taken = self.steps_taken.to(device)
+        if self.a2csf:
+            self.psis = self.psis.to(device)
+            self.estimated_rewards = self.estimated_rewards.to(device)#
+            self.psi_returns = self.psi_returns.to(device)
         self.repeats = self.repeats.to(device)
-        self.step = self.step.to(device)
+        self.steps_taken = self.steps_taken.to(device)
 
-        self.prev_actions = self.prev_actions.to(device)
+    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, feature, psi, estimated_reward, repeat, repeat_log_prob, steps_taken):
+        self.obs[self.step + 1].copy_(obs)
+        self.recurrent_hidden_states[self.step + 1].copy_(recurrent_hidden_states)
+        self.actions[self.step].copy_(actions)
+        if action_log_probs != None:
+            self.action_log_probs[self.step].copy_(action_log_probs)
+        if value_preds != None:
+            self.value_preds[self.step].copy_(value_preds)
+        if repeat_log_prob != None:
+            self.repeat_log_probs[self.step].copy_(repeat_log_prob)
+        self.rewards[self.step].copy_(rewards)
+        self.masks[self.step + 1].copy_(masks)
+        if self.a2csf:
+            self.features[self.step].copy_(feature)
+        else:
+            self.features[self.step + 1].copy_(feature)
+        if psi != None:
+            self.psis[self.step].copy_(psi)
+        if estimated_reward != None:
+            self.estimated_rewards[self.step].copy_(estimated_reward)
+        self.steps_taken[self.step].copy_(steps_taken.detach())
+        self.repeats[self.step].copy_(repeat.detach())
 
-        self.reward_acc = self.reward_acc.to(device)
-        self.psi_acc = self.psi_acc.to(device)
-        self.steps_taken_acc = self.steps_taken_acc.to(device)
+        self.step = (self.step + 1) % self.num_steps
 
-    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, feature, psi, prev_actions, repeats, repeat_log_probs, estimated_reward,repeat_end):
-        for i, end in enumerate(repeat_end):
-
-            # for loop :( - can replace with torch.where to generate bool masks
-            if self.step[i] != self.num_decisions:
-
-                if end:
-                    # tidying end of repeated action
-                    self.obs[self.step[i] + 1, i].copy_(obs[i])
-                    self.rewards[self.step[i], i].copy_(self.reward_acc[i])
-                    self.actions[self.step[i], i].copy_(prev_actions[i])
-                    self.masks[self.step[i], i].copy_(masks[i])
-                    self.recurrent_hidden_states[self.step[i] + 1, i].copy_(recurrent_hidden_states[i])
-                    self.steps_taken[self.step[i], i].copy_(self.steps_taken_acc[i])
-
-                    # preparing for next repeated action
-                    if action_log_probs[i] != None:
-                        self.action_log_probs[self.step[i], i].copy_(action_log_probs[i])
-                    if repeat_log_probs[i] != None:
-                        self.repeat_log_probs[self.step[i], i].copy_(repeat_log_probs[i])
-                    self.actions[self.step[i], i].copy_(prev_actions[i])
-                    self.features[self.step[i] + 1, i].copy_(feature[i])
-                    self.step[i] = self.step[i] + 1
-
-                    # reset accumulated variables
-                    self.reward_acc[i] = rewards[i].detach()
-                    self.steps_taken_acc[i] = 1
-
-                    self.repeats[i].copy_(repeats[i])
-                    # self.psi_acc ...
-                else:
-                    self.reward_acc[i] = self.reward_acc[i] + rewards[i].detach().to(self.obs.device)
-                    self.steps_taken_acc[i] = self.steps_taken_acc[i] + 1
-                    self.repeats[i].copy_(repeats[i])
-                    # self.psi_acc...
-
-                self.total_steps += 1
-
-        # this buffer needs to return a mask that informs the loop
-        # which processes are full and do not need to run in the env
-        full = np.array(torch.where(self.step == self.num_decisions, 1, 0).cpu().detach().numpy())
-
-        return full
-
-        #if psi != None:
-        #    self.psis[self.step].copy_(psi)
-        #if estimated_reward != None:
-        #    self.estimated_rewards[self.step].copy_(estimated_reward)
 
     def after_update(self):
         self.obs[0].copy_(self.obs[-1])
@@ -325,27 +272,33 @@ class TemporallyExtendedRolloutStorage(object):
         if not self.a2csf:
             self.features[0].copy_(self.features[-1])
 
-        self.reward_acc = torch.zeros(self.num_processes, 1).to(self.obs.device)
-        self.psi_acc = torch.zeros(self.num_processes, self.feature_dim).to(self.obs.device)
-        self.steps_taken = torch.ones(self.num_decisions, self.num_processes, 1).to(self.obs.device).long()
-        self.step = torch.zeros(self.num_processes).to(self.obs.device).long()
-        self.total_steps = 0
-
-    def compute_returns(self, next_value, repeats, gamma, tau, sf = False):
-        self.returns[-1] = next_value
-        if sf:
-            for step in reversed(range(self.estimated_rewards.size(0))):
-                self.returns[step] = self.returns[step + 1] * \
-                    (gamma ** self.steps_taken[step + 1]) * self.masks[step + 1] + self.estimated_rewards[step]
-        else:
+    def compute_returns(self, next_value, use_gae, gamma, tau, sf = False):
+        if use_gae:
+            self.value_preds[-1] = next_value
+            gae = 0
             for step in reversed(range(self.rewards.size(0))):
-                self.returns[step] = self.returns[step] * \
-                    (gamma ** self.steps_taken[step]) * self.masks[step + 1] + self.rewards[step]
+                delta = self.rewards[step] + gamma * self.value_preds[step + 1] * self.masks[step + 1] - self.value_preds[step]
+                gae = delta + gamma * tau * self.masks[step + 1] * gae
+                self.returns[step] = gae + self.value_preds[step]
+        else:
+            self.returns[-1] = next_value
+            if sf:
+                for step in reversed(range(self.estimated_rewards.size(0))):
+                    self.returns[step] = self.returns[step + 1] * \
+                        gamma * self.masks[step + 1] + self.estimated_rewards[step]
+            else:
+                for step in reversed(range(self.rewards.size(0))):
+                    self.returns[step] = self.returns[step + 1] * \
+                        (gamma ** (self.repeats[step] + 1)) *  self.masks[step + 1] + self.rewards[step]
+                        #(gamma ** self.steps_taken[step]) *  self.masks[step + 1] + self.rewards[step]
 
     def compute_psi_returns(self, next_psi, gamma):
         self.psi_returns[-1] = next_psi
         for step in reversed(range(self.psis.size(0))):
             self.psi_returns[step] = self.psi_returns[step + 1] * \
-                gamma * self.masks[step+1].repeat(1,self.psi_returns.shape[-1]) + self.features[step]
+                (gamma ** self.steps_taken[step]) * self.masks[step+1].repeat(1,self.psi_returns.shape[-1]) + self.features[step]
+
+        # function to use if computing the returns where the critic is
+        # based on a successor feature
 
 

@@ -31,12 +31,12 @@ class XPolicy(nn.Module):
         if action_space.__class__.__name__ == "Discrete":
             num_outputs = action_space.n
             self.dist = Categorical(self.base.output_size, num_outputs)
-            self.repeat_dist = Categorical(self.base.output_size, max_repeat)
+            self.repeat_dist = Categorical(self.base.output_size + 1, max_repeat)
 
         elif action_space.__class__.__name__ == "Box":
             num_outputs = action_space.shape[0]
             self.dist = DiagGaussian(self.base.output_size, num_outputs)
-            self.repeat_dist = Categorical(self.base.output_size, max_repeat)
+            self.repeat_dist = DiagGaussian(self.base.output_size + 1, max_repeat)
         else:
             raise NotImplementedError
 
@@ -52,62 +52,36 @@ class XPolicy(nn.Module):
     def forward(self, inputs, rnn_hxs, masks, features = None):
         raise NotImplementedError
 
-    def act(self, inputs, rnn_hxs, masks, features, prev_actions, repeats, deterministic=False):
-        # if the mask is done, repeat should be set back to zero
-        repeats = masks * repeats
-        # generate indicies where the repeat is greater than zero
+    def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
+        value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks, features)
 
-        repeat_mask = torch.where(repeats > 0, 1, 0).to(inputs.device)
-        # NOTE masking the inputs will prevent gradients from being backproped
-        # but this should not be an issue if this act method is only used in
-        # gathering experience
-        repeat_end = torch.where(repeats == 0, 1, 0).to(inputs.device)
-
-
-        value, actor_features, rnn_hxs = self.base(inputs * repeat_mask.unsqueeze(2).unsqueeze(2).repeat(1,1,inputs.shape[2], inputs.shape[3]), rnn_hxs * repeat_mask, masks, features)
         dist = self.dist(actor_features)
-        repeat_dist = self.repeat_dist(actor_features)
 
         if deterministic:
-            action = dist.mode()
-            #new_repeat = repeat_dist.mode() + 1
-            new_repeat = 2*torch.ones_like(repeats).long()
+            actions = dist.mode().long()
+            repeat_dist = self.repeat_dist(torch.cat([actor_features, actions.detach()], dim = -1))
+            repeats = repeat_dist.mode().long()
         else:
-            action = dist.sample()
-            new_repeat = 2*torch.ones_like(repeats).long()
-            #new_repeat = repeat_dist.sample() + 1
+            actions = dist.sample().long()
+            repeat_dist = self.repeat_dist(torch.cat([actor_features, actions.detach()], dim = -1))
+            repeats = repeat_dist.sample().long()
 
-
-        repeats = repeats.long()
-
-        action = torch.where(repeats > 0 , prev_actions, action)
-
-        repeats = torch.where(repeats > 0, repeats, new_repeat)
-
-        repeats = repeats - 1
-
-        # DEBUG
-
-
-        action_log_probs = dist.log_probs(action)
+        action_log_probs = dist.log_probs(actions)
         repeat_log_probs = repeat_dist.log_probs(repeats)
-
         dist_entropy = dist.entropy().mean()
         repeat_dist_entropy = repeat_dist.entropy().mean()
 
-        return value, action, action_log_probs, rnn_hxs, repeats, repeat_log_probs, repeat_end
+        return value, actions, action_log_probs, rnn_hxs, repeats, repeat_log_probs
 
     def get_value(self, inputs, rnn_hxs, masks, features = None):
         value, _, _ = self.base(inputs, rnn_hxs, masks, features)
         return value
 
     def evaluate_actions(self, inputs, rnn_hxs, masks, action, repeats, features = None):
-
         value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks, features)
         dist = self.dist(actor_features)
-        repeat_dist = self.repeat_dist(actor_features)
-        # repeats here is the steps taken - subtract one to bring it in range
-        repeats = repeats - 1
+        repeat_dist = self.repeat_dist(torch.cat([actor_features, dist.mode().detach()], dim = -1))
+
         action_log_probs = dist.log_probs(action)
         dist_entropy = dist.entropy().mean()
 
@@ -244,6 +218,89 @@ class SFConditionedPolicy(nn.Module):
     def evaluate_rewards(self, features):
         predicted_rewards = torch.matmul(features, self.base.w.t())
         return predicted_rewards
+
+class SFConditionedXPolicy(nn.Module):
+    """
+    class for temporally extended policies that output actions and repeats
+    """
+    def __init__(self, obs_shape, action_space, feature_size, max_repeat, base_kwargs=None):
+        super(SFConditionedXPolicy, self).__init__()
+        if base_kwargs is None:
+            base_kwargs = {}
+
+        if len(obs_shape) == 3:
+            self.base = CNNSFBase(obs_shape[0], feature_size, **base_kwargs)
+        elif len(obs_shape) == 1:
+            self.base = MLPSFBase(obs_shape[0], feature_size, **base_kwargs)
+        else:
+            raise NotImplementedError
+
+        if action_space.__class__.__name__ == "Discrete":
+            num_outputs = action_space.n
+            self.dist = Categorical(self.base.output_size + feature_size, num_outputs)
+            self.repeat_dist = Categorical(self.base.output_size + feature_size + 1, max_repeat)
+
+        elif action_space.__class__.__name__ == "Box":
+            num_outputs = action_space.shape[0]
+            self.dist = DiagGaussian(self.base.output_size + feature_size, num_outputs)
+            self.repeat_dist = DiagGaussian(self.base.output_size + feature_size +  1, max_repeat)
+        else:
+            raise NotImplementedError
+
+    @property
+    def is_recurrent(self):
+        return self.base.is_recurrent
+
+    @property
+    def recurrent_hidden_state_size(self):
+        """Size of rnn_hx."""
+        return self.base.recurrent_hidden_state_size
+
+    def forward(self, inputs, rnn_hxs, masks, features = None):
+        raise NotImplementedError
+
+    def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
+        value, actor_features, rnn_hxs, psi = self.base(inputs, rnn_hxs, masks, features)
+
+        dist = self.dist(actor_features)
+
+        if deterministic:
+            actions = dist.mode().long()
+            repeat_dist = self.repeat_dist(torch.cat([actor_features, actions.detach()], dim = -1))
+            repeats = repeat_dist.mode().long()
+        else:
+            actions = dist.sample().long()
+            repeat_dist = self.repeat_dist(torch.cat([actor_features, actions.detach()], dim = -1))
+            repeats = repeat_dist.sample().long()
+
+        action_log_probs = dist.log_probs(actions)
+        repeat_log_probs = repeat_dist.log_probs(repeats)
+        dist_entropy = dist.entropy().mean()
+        repeat_dist_entropy = repeat_dist.entropy().mean()
+
+        return value, actions, action_log_probs, rnn_hxs, repeats, repeat_log_probs, psi
+
+    def get_value(self, inputs, rnn_hxs, masks, features = None):
+        value, _, _, psi = self.base(inputs, rnn_hxs, masks, features)
+        return value, psi
+
+    def evaluate_actions(self, inputs, rnn_hxs, masks, action, repeats, features = None):
+        value, actor_features, rnn_hxs, psi = self.base(inputs, rnn_hxs, masks, features)
+        dist = self.dist(actor_features)
+        repeat_dist = self.repeat_dist(torch.cat([actor_features, dist.mode().detach()], dim = -1))
+
+        action_log_probs = dist.log_probs(action)
+        dist_entropy = dist.entropy().mean()
+
+        repeat_log_probs = repeat_dist.log_probs(repeats)
+        repeat_dist_entropy = repeat_dist.entropy().mean()
+
+        return value, action_log_probs, dist_entropy, rnn_hxs, repeat_log_probs, repeat_dist_entropy, psi
+
+    def evaluate_rewards(self, features):
+        predicted_rewards = torch.matmul(features, self.base.w.t())
+        return predicted_rewards
+
 
 class QPolicy(nn.Module):
     def __init__(self, obs_shape, action_space, feature_size, use_target_network = False, eps = 0.05, gamma = 0.99, base_kwargs=None):
