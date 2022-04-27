@@ -180,6 +180,8 @@ def main():
     start = time.time()
     wandb.init(project = "tSF", config = args)
 
+    task_switch_counter = 0
+
     if args.algo == "sf":
         for j in range(num_updates):
             for step in range(args.num_steps):
@@ -236,6 +238,7 @@ def main():
                 torch.save(save_model, os.path.join(save_path, args.env_name + ".pt"))
 
             total_num_steps = (j + 1) * args.num_processes * args.num_steps
+            task_switch_counter = (j + 1) * args.num_processes * args.num_steps
 
             if j % args.log_interval == 0 and len(episode_rewards) > 1:
                 end = time.time()
@@ -258,6 +261,10 @@ def main():
                            "psi_loss": float(psi_loss),
                            "phi_loss": float(phi_loss), "w_loss": float(w_loss)
                            }, step = total_num_steps)
+
+            if args.task_switch_interval > 0 and task_switch_counter > args.task_switch_interval:
+                obs = envs.switch()
+                task_switch_counter = 0
 
             if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
                 eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,
@@ -376,6 +383,8 @@ def main():
 
             total_num_steps = (j + 1) * args.num_processes * args.num_steps
 
+            task_switch_counter = (j + 1) * args.num_processes * args.num_steps
+
             if j % args.log_interval == 0 and len(episode_rewards) > 1:
                 end = time.time()
                 print("Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.2f}/{:.2f}, min/max reward {:.2f}/{:.2f}, success rate {:.2f}\n".
@@ -396,6 +405,10 @@ def main():
                            "num_updates": j,
                            "q_loss": float(q_loss),
                            }, step = total_num_steps)
+
+            if args.task_switch_interval > 0 and task_switch_counter > args.task_switch_interval:
+                obs = envs.switch()
+                task_switch_counter = 0
 
             if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
                 eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,
@@ -530,6 +543,7 @@ def main():
 
             total_num_steps = (j + 1) * args.num_processes * args.num_steps
 
+            task_switch_counter = (j + 1) * args.num_processes * args.num_steps
             if j % args.log_interval == 0 and len(episode_rewards) > 1:
                 end = time.time()
                 print("Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.2f}/{:.2f}, min/max reward {:.2f}/{:.2f}, success rate {:.2f}\n".
@@ -555,6 +569,9 @@ def main():
                            }, step = total_num_steps)
 
 
+            if args.task_switch_interval > 0 and task_switch_counter > args.task_switch_interval:
+                obs = envs.switch()
+                task_switch_counter = 0
 
             if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
                 eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,
@@ -690,6 +707,8 @@ def main():
 
             total_num_steps = total_num_steps + rollouts.steps_taken.sum()
 
+            total_num_des = (j + 1) * args.num_processes * args.num_steps
+            task_switch_counter = total_num_steps + rollouts.steps_taken.sum()
             rollouts.after_update()
 
             if j % args.save_interval == 0 and args.save_dir != "":
@@ -736,7 +755,12 @@ def main():
                            "repeat_loss": float(repeat_loss),
                            "repeat_dist_entropy": float(repeat_dist_entropy),
                            "repeat_histogram": repeat_histogram,
+                           "total_num_des": total_num_des
                            }, step = total_num_steps)
+
+            if args.task_switch_interval > 0 and task_switch_counter > args.task_switch_interval:
+                obs = envs.switch()
+                task_switch_counter = 0
 
             if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
                 eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,
@@ -795,6 +819,9 @@ def main():
                 wandb.log({"mean_eval_reward": np.mean(eval_episode_rewards),
                            }, step = total_num_steps)
 
+            # for temporally extended algs that take multiple time steps
+            if total_num_steps > args.num_frames:
+                break
 
             """
             if args.vis and j % args.vis_interval == 0:
@@ -875,6 +902,8 @@ def main():
                 repeat_loss, repeat_dist_entropy, psi_loss, w_loss = agent.update(rollouts, action_only)
 
             total_num_steps = total_num_steps + rollouts.steps_taken.sum()
+            task_switch_counter = total_num_steps + rollouts.steps_taken.sum()
+            total_num_des = (j + 1) * args.num_processes * args.num_steps
 
             rollouts.after_update()
 
@@ -922,9 +951,14 @@ def main():
                            "repeat_loss": float(repeat_loss),
                            "repeat_dist_entropy": float(repeat_dist_entropy),
                            "repeat_histogram": repeat_histogram,
+                           "total_num_des": total_num_des,
                            "psi_loss" : psi_loss,
                            "w_loss": w_loss
                            }, step = total_num_steps)
+
+            if args.task_switch_interval > 0 and task_switch_counter > args.task_switch_interval:
+                obs = envs.switch()
+                task_switch_counter = 0
 
             if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
                 eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,
@@ -982,6 +1016,10 @@ def main():
                                    ))
                 wandb.log({"mean_eval_reward": np.mean(eval_episode_rewards),
                            }, step = total_num_steps)
+
+            # for temporally extended algs that take multiple time steps
+            if total_num_steps > args.num_frames:
+                break
 
 
             """
@@ -1068,6 +1106,7 @@ def main():
                 torch.save(save_model, os.path.join(save_path, args.env_name + ".pt"))
 
             total_num_steps = (j + 1) * args.num_processes * args.num_steps
+            task_switch_counter = (j + 1) * args.num_processes * args.num_steps
 
             if j % args.log_interval == 0 and len(episode_rewards) > 1:
                 end = time.time()
@@ -1090,6 +1129,10 @@ def main():
                            "action_loss": float(action_loss),
                            "dist_entropy": float(dist_entropy)
                            }, step = total_num_steps)
+
+            if args.task_switch_interval > 0 and task_switch_counter > args.task_switch_interval:
+                obs = envs.switch()
+                task_switch_counter = 0
 
             if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
                 eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,

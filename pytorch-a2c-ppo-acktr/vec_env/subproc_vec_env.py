@@ -28,13 +28,15 @@ def worker(remote, parent_remote, env_fn_wrapper):
                 rewards += _rewards
                 steps_taken = steps_taken + 1
                 repeat_counter = repeat_counter + 1
+
                 if done:
                     ob = env.reset()
                     break
 
             info['steps_taken'] = steps_taken
             remote.send((ob, rewards, done, info))
-
+            #TODO return full list of obs and accumulated rewards to create
+            # a synthetic rollout later
         elif cmd == 'reset':
             ob = env.reset()
             remote.send(ob)
@@ -52,6 +54,11 @@ def worker(remote, parent_remote, env_fn_wrapper):
             done = False
             info = {"feature": np.array([0,0])}
             remote.send((ob, reward, done, info))
+
+        elif cmd == 'switch':
+            env.switch(data)
+            ob = env.render_obs().transpose(2,1,0)
+            remote.send(ob)
         else:
             raise NotImplementedError
 
@@ -101,6 +108,12 @@ class SubprocVecEnv(VecEnv):
     def reset_task(self):
         for remote in self.remotes:
             remote.send(('reset_task', None))
+        return np.stack([remote.recv() for remote in self.remotes])
+
+    def switch(self, idx):
+        # TODO idx is not used here yet - placeholder
+        for remote in self.remotes:
+            remote.send(('switch', None))
         return np.stack([remote.recv() for remote in self.remotes])
 
     def close(self):

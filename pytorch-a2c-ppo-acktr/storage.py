@@ -19,6 +19,7 @@ class RolloutStorage(object):
         self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
         if self.a2csf:
             self.features = torch.zeros(num_steps, num_processes, feature_dim)
+            self.psis = torch.zeros(num_steps, num_processes, feature_dim)
         else:
             self.features = torch.zeros(num_steps + 1 , num_processes, feature_dim)
 

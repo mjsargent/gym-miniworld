@@ -72,6 +72,8 @@ def get_args():
                         help = 'if using an initial interval  without repeats, how long \
                                     the interval will be as a proportion of \
                                     the total of number of episodes')
+    parser.add_argument('--task_switch_interval', type = int, default = -1,
+                        help = "how often (in steps) to switch tasks")
 
     args = parser.parse_args()
 
