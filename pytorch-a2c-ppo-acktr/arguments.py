@@ -74,7 +74,8 @@ def get_args():
                                     the total of number of episodes')
     parser.add_argument('--task_switch_interval', type = int, default = -1,
                         help = "how often (in steps) to switch tasks")
-
+    parser.add_argument('--feature_size', type = int, default = -1,
+                        help = "how large the learnt feature is (if less than one, use the env features ")
     args = parser.parse_args()
 
     args.cuda = not args.no_cuda and torch.cuda.is_available()

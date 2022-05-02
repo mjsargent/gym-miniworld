@@ -71,32 +71,38 @@ def main():
         win = None
     """
 
-    feature_size = 2
+    if args.feature_size > 1:
+        feature_size = args.feature_size
+        learn_phi = True
+    else:
+        feature_size = 2
+        learn_phi = False
     envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
                         args.gamma, args.log_dir, args.add_timestep, device, False)
 
     if args.algo == 'sf':
-        policy= SFPolicy(envs.observation_space.shape, envs.action_space, feature_size = 2,
+        policy= SFPolicy(envs.observation_space.shape, envs.action_space, feature_size = feature_size,
             base_kwargs={'recurrent': args.recurrent_policy})
         policy.to(device)
     elif args.algo == "q":
-        policy= QPolicy(envs.observation_space.shape, envs.action_space, feature_size = 2,
+        policy= QPolicy(envs.observation_space.shape, envs.action_space, feature_size = feature_size,
             base_kwargs={'recurrent': args.recurrent_policy})
         policy.to(device)
     elif args.algo == "a2csf":
-        actor_critic = SFConditionedPolicy(envs.observation_space.shape, envs.action_space, feature_size = 2,
+        actor_critic = SFConditionedPolicy(envs.observation_space.shape, envs.action_space, feature_size = feature_size, learn_phi = learn_phi,
             base_kwargs={'recurrent': args.recurrent_policy})
         actor_critic.to(device)
     elif args.algo == "a2cx":
-        actor_critic = XPolicy(envs.observation_space.shape, envs.action_space, feature_size = 2,
+        actor_critic = XPolicy(envs.observation_space.shape, envs.action_space, feature_size = feature_size,
             max_repeat = args.max_repeat, base_kwargs={'recurrent': args.recurrent_policy})
         actor_critic.to(device)
+
     elif args.algo == "a2csfx":
-        actor_critic = SFConditionedXPolicy(envs.observation_space.shape, envs.action_space, feature_size = 2,
+        actor_critic = SFConditionedXPolicy(envs.observation_space.shape, envs.action_space, feature_size = feature_size,
             max_repeat = args.max_repeat, base_kwargs={'recurrent': args.recurrent_policy})
         actor_critic.to(device)
     else:
-        actor_critic = Policy(envs.observation_space.shape, envs.action_space, feature_size = 2,
+        actor_critic = Policy(envs.observation_space.shape, envs.action_space, feature_size = feature_size,
             base_kwargs={'recurrent': args.recurrent_policy})
         actor_critic.to(device)
 
@@ -106,7 +112,7 @@ def main():
                                args.entropy_coef, lr=args.lr,
                                eps=args.eps, alpha=args.alpha,
                                max_grad_norm=args.max_grad_norm,
-                               feature_size = 2)
+                               feature_size = feature_size)
 
     elif args.algo == 'a2csf':
         agent = algo.A2C_SF(actor_critic, args.value_loss_coef,
@@ -114,13 +120,16 @@ def main():
                                lr_policy = args.lr, lr_w = 1,
                                eps=args.eps, alpha=args.alpha,
                                max_grad_norm=args.max_grad_norm,
-                               feature_size = 2, gamma=args.gamma)
+                               feature_size = feature_size, gamma=args.gamma,
+                                learn_phi = learn_phi)
     elif args.algo == "a2cx":
         agent = algo.A2CX(actor_critic, args.value_loss_coef,
                                args.entropy_coef, lr = args.lr,
                                eps=args.eps, alpha=args.alpha,
                                max_grad_norm=args.max_grad_norm,
-                               feature_size = 2, gamma=args.gamma)
+                               feature_size = feature_size, gamma=args.gamma,
+                                )
+
     elif args.algo == 'ppo':
         agent = algo.PPO(actor_critic, args.clip_param, args.ppo_epoch, args.num_mini_batch,
                          args.value_loss_coef, args.entropy_coef, lr=args.lr,
@@ -138,7 +147,7 @@ def main():
                                eps=args.eps, alpha=args.alpha,
                                lr_w = 1,
                                max_grad_norm=args.max_grad_norm,
-                               feature_size = 2, gamma=args.gamma)
+                               feature_size = feature_size, gamma=args.gamma)
     elif args.algo == 'q':
         agent = algo.QLearning(policy, feature_size = feature_size,
                         lr=args.lr, eps=args.eps_explore)
@@ -259,7 +268,8 @@ def main():
                            "success_rate": np.count_nonzero(np.greater(episode_rewards, 0)) / len(episode_rewards),
                            "num_updates": j,
                            "psi_loss": float(psi_loss),
-                           "phi_loss": float(phi_loss), "w_loss": float(w_loss)
+                           "phi_loss": float(phi_loss), "w_loss": float(w_loss),
+                           "num_updates" : total_num_steps
                            }, step = total_num_steps)
 
             if args.task_switch_interval > 0 and task_switch_counter > args.task_switch_interval:
@@ -474,23 +484,23 @@ def main():
             for step in range(args.num_steps):
                 # Sample actions
                 with torch.no_grad():
-
-                    value, action, action_log_prob, recurrent_hidden_states, psi = actor_critic.act(
+                    value, action, action_log_prob, recurrent_hidden_states, psi, feature, z = actor_critic.act(
                             rollouts.obs[step],
                             rollouts.recurrent_hidden_states[step],
                             rollouts.masks[step],
                             rollouts.features[step])
-
                 # Obser reward and next obs
                 obs, reward, done, infos = envs.step(action)
 
                 # info is a tuple of dicts
-                _feature = []
-                for info in infos:
-                    if "feature" in info.keys():
-                        _feature.append(info["feature"])
+                if not actor_critic.learn_phi:
+                    _feature = []
+                    for info in infos:
+                        if "feature" in info.keys():
+                            _feature.append(info["feature"])
 
-                feature = torch.FloatTensor(np.stack(_feature, axis = 0)).to(device)
+                    feature = torch.FloatTensor(np.stack(_feature, axis = 0)).to(device)
+
                 estimated_reward = actor_critic.evaluate_rewards(feature)
                 """
                 for info in infos:
@@ -509,16 +519,16 @@ def main():
                 rollouts.insert(obs, recurrent_hidden_states, action, action_log_prob, value, reward, masks, feature, psi, estimated_reward)
 
             with torch.no_grad():
-                next_value, next_psi = actor_critic.get_value(rollouts.obs[-1],
+                next_value, next_psi, next_phi= actor_critic.get_value(rollouts.obs[-1],
                                                     rollouts.recurrent_hidden_states[-1],
                                                     rollouts.masks[-1],
                                                     rollouts.features[-1])
 
 
             rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.tau, sf = True)
-            rollouts.compute_psi_returns(next_psi,args.gamma)
+            rollouts.compute_psi_returns(next_psi,args.gamma, next_phi)
 
-            value_loss, action_loss, dist_entropy, psi_loss, w_loss = agent.update(rollouts)
+            value_loss, action_loss, dist_entropy, psi_loss, w_loss, phi_loss = agent.update(rollouts)
 
             rollouts.after_update()
 
@@ -565,7 +575,8 @@ def main():
                            "action_loss": float(action_loss),
                            "dist_entropy": float(dist_entropy),
                            "psi_loss": float(psi_loss),
-                           "w_loss": float(w_loss)
+                           "w_loss": float(w_loss),
+                           "phi_loss": float(phi_loss),
                            }, step = total_num_steps)
 
 
@@ -844,7 +855,7 @@ def main():
             for step in range(args.num_steps):
 
                 with torch.no_grad():
-                    value, action, action_log_prob, recurrent_hidden_states, repeat, repeat_log_prob, psi = actor_critic.act(
+                    value, action, action_log_prob, recurrent_hidden_states, repeat, repeat_log_prob, psi, _, _ = actor_critic.act(
                             rollouts.obs[step],
                             rollouts.recurrent_hidden_states[step],
                             rollouts.masks[step],

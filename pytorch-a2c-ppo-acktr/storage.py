@@ -8,17 +8,28 @@ def _flatten_helper(T, N, _tensor):
 
 
 class RolloutStorage(object):
-    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size, feature_dim, a2csf = False):
+    def __init__(self, num_steps, num_processes, obs_shape, action_space, recurrent_hidden_state_size, feature_dim, a2csf = False, learn_phi = False, z_samples = 0):
         self.a2csf = a2csf
         self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
         self.recurrent_hidden_states = torch.zeros(num_steps + 1, num_processes, recurrent_hidden_state_size)
         self.rewards = torch.zeros(num_steps, num_processes, 1)
         self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
         self.returns = torch.zeros(num_steps + 1, num_processes, 1)
-        self.psi_returns = torch.zeros(num_steps + 1, num_processes, feature_dim)
+        if z_samples > 0:
+            self.psi_returns = torch.zeros(num_steps + 1, num_processes * (z_samples + 1), feature_dim)
+            self.multitask = True
+        else:
+            self.psi_returns = torch.zeros(num_steps + 1, num_processes, feature_dim)
+            self.multitask = False
         self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
+        self.learn_phi = learn_phi
+        # if learning the features, note that what is inserted is the embedding
+        # of the current state, therefore we need to shift this by one
         if self.a2csf:
-            self.features = torch.zeros(num_steps, num_processes, feature_dim)
+            if self.learn_phi:
+                self.features = torch.zeros(num_steps + 1, num_processes, feature_dim)
+            else:
+                self.features = torch.zeros(num_steps, num_processes, feature_dim)
             self.psis = torch.zeros(num_steps, num_processes, feature_dim)
         else:
             self.features = torch.zeros(num_steps + 1 , num_processes, feature_dim)
@@ -38,6 +49,12 @@ class RolloutStorage(object):
         self.num_steps = num_steps
         self.step = 0
 
+        # multitask storage
+        self.z_samples = z_samples
+        if self.multitask > 0:
+            self.z_storage = torch.zeros(num_steps, num_processes, self.z_samples, self.feature_size)
+
+
     def to(self, device):
         self.obs = self.obs.to(device)
         self.recurrent_hidden_states = self.recurrent_hidden_states.to(device)
@@ -52,8 +69,10 @@ class RolloutStorage(object):
         if self.a2csf:
             self.psis = self.psis.to(device)
         self.estimated_rewards = self.estimated_rewards.to(device)
+        if self.multitask:
+            self.z_storage.to(device)
 
-    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, feature, psi, estimated_reward):
+    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, feature, psi, estimated_reward, z = None):
         self.obs[self.step + 1].copy_(obs)
         self.recurrent_hidden_states[self.step + 1].copy_(recurrent_hidden_states)
         self.actions[self.step].copy_(actions)
@@ -72,6 +91,8 @@ class RolloutStorage(object):
         if estimated_reward != None:
             self.estimated_rewards[self.step].copy_(estimated_reward)
         self.step = (self.step + 1) % self.num_steps
+        if self.multitask > 0:
+            self.z_storage[self.step].copy(z)
 
     def after_update(self):
         self.obs[0].copy_(self.obs[-1])
@@ -100,10 +121,17 @@ class RolloutStorage(object):
                     self.returns[step] = self.returns[step + 1] * \
                         gamma * self.masks[step + 1] + self.rewards[step]
 
-    def compute_psi_returns(self, next_psi, gamma):
+    def compute_psi_returns(self, next_psi, gamma, final_phi = None):
+
         self.psi_returns[-1] = next_psi
-        for step in reversed(range(self.psis.size(0))):
-            self.psi_returns[step] = self.psi_returns[step + 1] * \
+        if self.learn_phi:
+            self.feature[-1] = final_phi
+            for step in reversed(range(self.psis.size(0))):
+                self.psi_returns[step] = self.psi_returns[step + 1] * \
+                gamma * self.masks[step+1].repeat(1,self.psi_returns.shape[-1]) + self.features[step+1]
+        else:
+            for step in reversed(range(self.psis.size(0))):
+                self.psi_returns[step] = self.psi_returns[step + 1] * \
                 gamma * self.masks[step+1].repeat(1,self.psi_returns.shape[-1]) + self.features[step]
 
         # function to use if computing the returns where the critic is

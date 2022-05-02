@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 from distributions import Categorical, DiagGaussian
 from utils import init, init_normc_
 
@@ -11,6 +10,13 @@ class Flatten(nn.Module):
     def forward(self, x):
         return x.view(x.size(0), -1)
 
+class Reshape(nn.Module):
+    def __init__(self, dims: list):
+        super(Reshape, self).__init__()
+        self.dims = dims
+
+    def forward(self, x):
+        return x.view(x.size(0), *self.dims)
 
 class XPolicy(nn.Module):
     """
@@ -54,7 +60,7 @@ class XPolicy(nn.Module):
 
     def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
         value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks, features)
-
+        #print(actor_features)
         dist = self.dist(actor_features)
 
         if deterministic:
@@ -153,13 +159,17 @@ class Policy(nn.Module):
         return value, action_log_probs, dist_entropy, rnn_hxs
 
 class SFConditionedPolicy(nn.Module):
-    def __init__(self, obs_shape, action_space, feature_size, base_kwargs=None):
+    def __init__(self, obs_shape, action_space, feature_size, base_kwargs=None, learn_phi = True, multitask = False, z_sigma = 0.1, task_embedding_size = 32):
         super(SFConditionedPolicy, self).__init__()
+        self.learn_phi = learn_phi
+        self.multitask = multitask
+        self.z_sigma = 0.1
+        self.task_embedding_size = task_embedding_size
         if base_kwargs is None:
             base_kwargs = {}
 
         if len(obs_shape) == 3:
-            self.base = CNNSFBase(obs_shape[0], feature_size, **base_kwargs)
+            self.base = CNNSFBase(obs_shape[0], feature_size, task_embedding_size = task_embedding_size, **base_kwargs)
 
         elif len(obs_shape) == 1:
             self.base = MLPSFBase(obs_shape[0], feature_size, **base_kwargs)
@@ -168,13 +178,16 @@ class SFConditionedPolicy(nn.Module):
 
         if action_space.__class__.__name__ == "Discrete":
             num_outputs = action_space.n
-            self.dist = Categorical(self.base.output_size + feature_size, num_outputs)
+            self.dist = Categorical(self.base.output_size + task_embedding_size, num_outputs)
 
         elif action_space.__class__.__name__ == "Box":
             num_outputs = action_space.shape[0]
-            self.dist = DiagGaussian(self.base.output_size + feature_size, num_outputs)
+            self.dist = DiagGaussian(self.base.output_size + task_embedding_size, num_outputs)
         else:
             raise NotImplementedError
+
+        if learn_phi:
+            self.phi_net = ConvAutoEncoder(obs_shape[0], feature_size, condition_action=True, condition_repeat = False, num_actions = num_outputs)
 
     @property
     def is_recurrent(self):
@@ -188,31 +201,80 @@ class SFConditionedPolicy(nn.Module):
     def forward(self, inputs, rnn_hxs, masks, features = None):
         raise NotImplementedError
 
-    def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
-        value, actor_features, rnn_hxs, psi = self.base(inputs, rnn_hxs, masks, features)
+    def sample_z(self, w, z_n):
+        # make sure w is a float
+        z = torch.normal(w.repeat(z_n, w.shape[1]).float(), std = self.z_sigma)
+        return z
+
+    def act(self, inputs, rnn_hxs, masks, features, deterministic=False, w = None, z = None, z_n = 30):
+
+        value, actor_features, rnn_hxs, psi, latent = self.base(inputs, rnn_hxs, masks, features, w)
+
         dist = self.dist(actor_features)
 
-        if deterministic:
-            action = dist.mode()
+        if self.multitask:
+            if z == None:
+                z_gpi = self.sample_z(w, z_n)
+
+
+                value_gpi, actor_feature_gpi, psi_gpi = self.base.forward_GPI(latent, masks, z_gpi)
+                actor_feature_gpi = torch.cat([actor_feature, actor_feature_gpi], axis = -1)
+                value_gpi = torch.cat([value, value_gpi])
+
+                dist_gpi = self.dist(actor_feature_gpi)
+                max_gpi_value = torch.argmax(value_gpi, dim = -1)
+
+            else:
+                z_gpi = z
+                value_gpi, actor_feature_gpi, psi_gpi = self.base.forward_GPI(latent, masks, z)
+                dist_gpi = self.dist(actor_feature_gpi)
+                max_gpi_value = torch.argmax(value_gpi, dim = -1)
+                # if we are not training, the z we got was the set which we are
+                # going to do GPI over so no need to sample more
+
+            best_dists = dist_gpi[torch.arange(dist.shape[0]), max_gpi_value]
+
+            if deterministic:
+                action = best_dists.mode()
+            else:
+                action = best_dist.sample()
+
         else:
-            action = dist.sample()
+
+            if deterministic:
+                action = dist.mode()
+            else:
+                action = dist.sample()
+
+            z_gpi = None
+            psi_gpi = psi
 
         action_log_probs = dist.log_probs(action)
         dist_entropy = dist.entropy().mean()
 
-        return value, action, action_log_probs, rnn_hxs, psi
+        if self.learn_phi:
+            phi = self.phi_net.get_feature(inputs)
+        else:
+            phi = None
+
+        return value, action, action_log_probs, rnn_hxs, psi_gpi, phi, z_gpi
 
     def get_value(self, inputs, rnn_hxs, masks, features = None):
-        value, _, _, psi = self.base(inputs, rnn_hxs, masks, features)
-        return value, psi
+        phi = None
+        value, _, _, psi, _ = self.base(inputs, rnn_hxs, masks, features)
+        if self.learn_phi:
+            phi = self.phi_net.get_feature(inputs)
+        return value, psi, phi
 
-    def evaluate_actions(self, inputs, rnn_hxs, masks, action, features = None):
-        value, actor_features, rnn_hxs, psi = self.base(inputs, rnn_hxs, masks, features)
+    def evaluate_actions(self, inputs, rnn_hxs, masks, action, features = None, z = None):
+        value, actor_features, rnn_hxs, psi, latent = self.base(inputs, rnn_hxs, masks, features)
+        if self.multitask:
+            # we only need the ""
+            value_gpi, actor_feature_gpi, psi_gpi =  self.base.forward_GPI(latent, masks, z)
         dist = self.dist(actor_features)
 
         action_log_probs = dist.log_probs(action)
         dist_entropy = dist.entropy().mean()
-
         return value, action_log_probs, dist_entropy, rnn_hxs, psi
 
     def evaluate_rewards(self, features):
@@ -223,8 +285,10 @@ class SFConditionedXPolicy(nn.Module):
     """
     class for temporally extended policies that output actions and repeats
     """
-    def __init__(self, obs_shape, action_space, feature_size, max_repeat, base_kwargs=None):
+    def __init__(self, obs_shape, action_space, feature_size, max_repeat, base_kwargs=None, task_embedding_size  =32):
         super(SFConditionedXPolicy, self).__init__()
+        self.learn_phi = False
+        self.task_embedding_size = task_embedding_size
         if base_kwargs is None:
             base_kwargs = {}
 
@@ -237,13 +301,13 @@ class SFConditionedXPolicy(nn.Module):
 
         if action_space.__class__.__name__ == "Discrete":
             num_outputs = action_space.n
-            self.dist = Categorical(self.base.output_size + feature_size, num_outputs)
-            self.repeat_dist = Categorical(self.base.output_size + feature_size + 1, max_repeat)
+            self.dist = Categorical(self.base.output_size + task_embedding_size, num_outputs)
+            self.repeat_dist = Categorical(self.base.output_size + task_embedding_size + 1, max_repeat)
 
         elif action_space.__class__.__name__ == "Box":
             num_outputs = action_space.shape[0]
             self.dist = DiagGaussian(self.base.output_size + feature_size, num_outputs)
-            self.repeat_dist = DiagGaussian(self.base.output_size + feature_size +  1, max_repeat)
+            self.repeat_dist = DiagGaussian(self.base.output_size + task_embedding_size +  1, max_repeat)
         else:
             raise NotImplementedError
 
@@ -260,7 +324,7 @@ class SFConditionedXPolicy(nn.Module):
         raise NotImplementedError
 
     def act(self, inputs, rnn_hxs, masks, features, deterministic=False):
-        value, actor_features, rnn_hxs, psi = self.base(inputs, rnn_hxs, masks, features)
+        value, actor_features, rnn_hxs, psi, _ = self.base(inputs, rnn_hxs, masks, features)
 
         dist = self.dist(actor_features)
 
@@ -278,14 +342,19 @@ class SFConditionedXPolicy(nn.Module):
         dist_entropy = dist.entropy().mean()
         repeat_dist_entropy = repeat_dist.entropy().mean()
 
-        return value, actions, action_log_probs, rnn_hxs, repeats, repeat_log_probs, psi
+        if self.learn_phi:
+            phi = self.phi_net.get_feature(inputs)
+        else:
+            phi = None
+
+        return value, actions, action_log_probs, rnn_hxs, repeats, repeat_log_probs, psi, phi, None
 
     def get_value(self, inputs, rnn_hxs, masks, features = None):
-        value, _, _, psi = self.base(inputs, rnn_hxs, masks, features)
+        value, _, _, psi, _ = self.base(inputs, rnn_hxs, masks, features)
         return value, psi
 
     def evaluate_actions(self, inputs, rnn_hxs, masks, action, repeats, features = None):
-        value, actor_features, rnn_hxs, psi = self.base(inputs, rnn_hxs, masks, features)
+        value, actor_features, rnn_hxs, psi, _ = self.base(inputs, rnn_hxs, masks, features)
         dist = self.dist(actor_features)
         repeat_dist = self.repeat_dist(torch.cat([actor_features, dist.mode().detach()], dim = -1))
 
@@ -295,7 +364,7 @@ class SFConditionedXPolicy(nn.Module):
         repeat_log_probs = repeat_dist.log_probs(repeats)
         repeat_dist_entropy = repeat_dist.entropy().mean()
 
-        return value, action_log_probs, dist_entropy, rnn_hxs, repeat_log_probs, repeat_dist_entropy, psi
+        return value, action_log_probs, dist_entropy, rnn_hxs, repeat_log_probs, repeat_dist_entropy, psi, _
 
     def evaluate_rewards(self, features):
         predicted_rewards = torch.matmul(features, self.base.w.t())
@@ -479,7 +548,12 @@ class SFPolicy(nn.Module):
         else:
             action = torch.argmax(q, dim = -1, keepdims = True)
 
-        return q, psi, action, None, rnn_hxs
+        if self.learn_phi:
+            phi = self.phi_net.get_feature(inputs)
+        else:
+            phi = None
+
+        return q, psi, action, None, rnn_hxs, phi
 
     def get_value(self, inputs, rnn_hxs, masks, features = None):
         # overloaded to mean q values
@@ -745,9 +819,11 @@ class CNNXBase(NNBase):
 
 
 class CNNSFBase(NNBase):
-    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=128, num_actions = 3):
+    def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=128, num_actions = 3, task_embedding_size = 32):
         super(CNNSFBase, self).__init__(recurrent, hidden_size, hidden_size, feature_size)
         self.feature_size = feature_size
+        self.task_embedding_size = task_embedding_size
+
 
         init_ = lambda m: init(m,
             nn.init.orthogonal_,
@@ -787,17 +863,22 @@ class CNNSFBase(NNBase):
             lambda x: nn.init.constant_(x, 0))
         # successor feature parameters
 
-        self.sf = nn.Sequential(init_(nn.Linear(hidden_size + feature_size, feature_size)),
+        self.sf = nn.Sequential(init_(nn.Linear(hidden_size + task_embedding_size, feature_size)),
                                       nn.LeakyReLU(),
                                       init_(nn.Linear(feature_size,feature_size))
                         )
         self.w = nn.Parameter(torch.zeros(1, feature_size))
+        self.task_embedding = nn.Sequential(nn.Linear(feature_size, task_embedding_size),
+                                            nn.ReLU(),
+                                            nn.Linear(task_embedding_size, task_embedding_size),
+                                            nn.ReLU())
+
         #self.w = nn.Parameter(torch.FloatTensor([[-1,1]]))
         #self.w = torch.tensor([-1, 1]).to(self.sf.device())
 
         self.train()
 
-    def forward(self, inputs, rnn_hxs, masks, features = None):
+    def forward(self, inputs, rnn_hxs, masks, features = None, w = None):
         #print(inputs.size())
 
         x = inputs / 255.0
@@ -807,16 +888,41 @@ class CNNSFBase(NNBase):
         #print(x.size())
 
         if self.is_recurrent:
-            x, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)
+            latent, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)
 
         # x is still the policy dist features
-
-        x = torch.cat([x, self.w.repeat(x.shape[0], 1)], axis = -1)
+        if w is not None:
+            w_embedding = self.task_embedding(w)
+            x = torch.cat([latent, w_embedding], axis = -1)
+        else:
+            with torch.no_grad():
+                w = self.w
+            w_embedding = self.task_embedding(w.repeat(x.shape[0], 1))
+            x = torch.cat([latent, w_embedding], axis = -1)
+            w = w.t()
 
         psi = self.sf(x)
-        critic_value = torch.matmul(psi, self.w.t())
+        critic_value = torch.matmul(psi, w)
 
-        return critic_value, x, rnn_hxs, psi
+        return critic_value, x, rnn_hxs, psi, latent
+
+    def forward_GPI(self, latent, masks, w):
+        # needs non flattened inputs
+        # w: t x b x n_z x phi_dim
+        # repeat interleve for the latent to match up each agent with the
+        # correct phi
+        latent = torch.repeat_interleave(latent, w.shape[2], dim = 1)
+        w = w.view(-1, w.shape[3])
+        w_embedding = self.task_embedding(w)
+        x = torch.cat([latent, w_embedding], axis = -1)
+        psi = self.sf(x)
+        critic_value = torch.matmul(psi, w)
+        return critic_value, x, psi
+
+
+    def act_GPI(self, latent, masks, w):
+        pass
+
 
 
 
@@ -867,3 +973,84 @@ class MLPBase(NNBase):
         hidden_actor = self.actor(x)
 
         return self.critic_linear(hidden_critic), hidden_actor, rnn_hxs
+
+class ConvAutoEncoder(nn.Module):
+    def __init__(self, num_inputs, feature_size = 2, condition_action = True, condition_repeat = False, num_actions = 3, max_repeat = 10):
+        super(ConvAutoEncoder, self).__init__()
+        self.feature_size = feature_size
+        self.condition_action = condition_action
+        self.condition_repeat= condition_repeat
+        self.num_actions = num_actions
+        self.max_repeat = max_repeat
+
+        init_ = lambda m: init(m,
+            nn.init.orthogonal_,
+            lambda x: nn.init.constant_(x, 0),
+            nn.init.calculate_gain('relu'))
+
+        # overwrite output size
+        #@property
+        #def output_size(self):
+        #    return self._hidden_size + feature_size
+
+        # For 80x60 input - same as the agent's encoder but without batchnorm
+        self.encoder = nn.Sequential(
+            init_(nn.Conv2d(num_inputs, 32, kernel_size=5, stride=2)),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+
+            init_(nn.Conv2d(32, 32, kernel_size=5, stride=2)),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+
+            init_(nn.Conv2d(32, 32, kernel_size=4, stride=2)),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+
+            Flatten(),
+
+            #nn.Dropout(0.2),
+
+            init_(nn.Linear(32 * 7 * 5, feature_size)),
+            nn.ReLU()
+            # NB phi will be constrained to be positive with this ReLU
+        )
+
+        condition_dim = int(self.condition_action) + int(self.condition_repeat)
+
+        self.decoder = nn.Sequential(
+            init_(nn.Linear(feature_size + condition_dim, 32 * 7 * 5)),
+            nn.ReLU(),
+
+            Reshape([32, 7, 5]),
+
+            init_(nn.ConvTranspose2d(32, 32, kernel_size=4, stride=2)),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+
+            init_(nn.ConvTranspose2d(32, 32, kernel_size=5, stride=2, output_padding = 1)),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+
+            init_(nn.ConvTranspose2d(32, num_inputs, kernel_size=6, stride=2, dilation = 3, padding = (3, 5) ))
+        )
+
+    def forward(self, x, a = None, j = None):
+
+        x = x / 255.0
+        phi = F.normalize(self.encoder(x),  p=2, dim = -1)
+        if self.condition_action:
+            a = a / self.num_actions
+            if self.condition_repeat:
+                j = j / self.max_repeat
+                prediction = self.decoder(torch.cat([phi, a, j], axis = -1))
+            else:
+                prediction = self.decoder(torch.cat([phi, a], axis = -1))
+        else:
+            prediction = self.decoder(phi)
+        return prediction, phi
+
+
+    def get_feature(self, x):
+        return F.normalize(self.encoder(x), p =2 , dim=-1)
+
