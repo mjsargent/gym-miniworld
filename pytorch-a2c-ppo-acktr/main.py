@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.profiler import profile, record_function, ProfilerActivity
 #torch.autograd.set_detect_anomaly(True)
 
 import algo
@@ -480,6 +481,7 @@ def main():
         envs.close()
 
     elif args.algo == "a2csf":
+
         for j in range(num_updates):
             for step in range(args.num_steps):
                 # Sample actions
@@ -569,15 +571,15 @@ def main():
                     )
                 )
                 wandb.log({"mean_reward": np.mean(episode_rewards),
-                           "success_rate": np.count_nonzero(np.greater(episode_rewards, 0)) / len(episode_rewards),
-                           "num_updates": j,
-                           "value_loss": float(value_loss),
-                           "action_loss": float(action_loss),
-                           "dist_entropy": float(dist_entropy),
-                           "psi_loss": float(psi_loss),
-                           "w_loss": float(w_loss),
-                           "phi_loss": float(phi_loss),
-                           }, step = total_num_steps)
+                        "success_rate": np.count_nonzero(np.greater(episode_rewards, 0)) / len(episode_rewards),
+                        "num_updates": j,
+                        "value_loss": float(value_loss),
+                        "action_loss": float(action_loss),
+                        "dist_entropy": float(dist_entropy),
+                        "psi_loss": float(psi_loss),
+                        "w_loss": float(w_loss),
+                        "phi_loss": float(phi_loss),
+                        }, step = total_num_steps)
 
 
             if args.task_switch_interval > 0 and task_switch_counter > args.task_switch_interval:
@@ -635,20 +637,12 @@ def main():
                 print(" Evaluation using {} episodes: mean reward {:.5f}\n".format(
                     len(eval_episode_rewards),
                     np.mean(eval_episode_rewards)
-                                   ))
+                                ))
                 wandb.log({"mean_eval_reward": np.mean(eval_episode_rewards),
-                           }, step = total_num_steps)
+                        }, step = total_num_steps)
 
-
-            """
-            if args.vis and j % args.vis_interval == 0:
-                try:
-                    # Sometimes monitor doesn't properly flush the outputs
-                    win = visdom_plot(viz, win, args.log_dir, args.env_name,
-                                    args.algo, args.num_frames)
-                except IOError:
-                    pass
-            """
+        #if j % 100 == 0:
+        #    print(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
 
         envs.close()
 

@@ -13,14 +13,17 @@ class RolloutStorage(object):
         self.obs = torch.zeros(num_steps + 1, num_processes, *obs_shape)
         self.recurrent_hidden_states = torch.zeros(num_steps + 1, num_processes, recurrent_hidden_state_size)
         self.rewards = torch.zeros(num_steps, num_processes, 1)
-        self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
+
         self.returns = torch.zeros(num_steps + 1, num_processes, 1)
+        self.feature_dim = feature_dim
         if z_samples > 0:
             self.psi_returns = torch.zeros(num_steps + 1, num_processes * (z_samples + 1), feature_dim)
             self.multitask = True
+            self.value_preds = torch.zeros(num_steps + 1, num_processes * (z_samples + 1), 1)
         else:
             self.psi_returns = torch.zeros(num_steps + 1, num_processes, feature_dim)
             self.multitask = False
+            self.value_preds = torch.zeros(num_steps + 1, num_processes, 1)
         self.action_log_probs = torch.zeros(num_steps, num_processes, 1)
         self.learn_phi = learn_phi
         # if learning the features, note that what is inserted is the embedding
@@ -30,7 +33,10 @@ class RolloutStorage(object):
                 self.features = torch.zeros(num_steps + 1, num_processes, feature_dim)
             else:
                 self.features = torch.zeros(num_steps, num_processes, feature_dim)
-            self.psis = torch.zeros(num_steps, num_processes, feature_dim)
+            if self.multitask:
+                self.psis = torch.zeros(num_steps, num_processes * (z_samples + 1), feature_dim)
+            else:
+                self.psis = torch.zeros(num_steps, num_processes, feature_dim)
         else:
             self.features = torch.zeros(num_steps + 1 , num_processes, feature_dim)
 
@@ -51,8 +57,9 @@ class RolloutStorage(object):
 
         # multitask storage
         self.z_samples = z_samples
-        if self.multitask > 0:
-            self.z_storage = torch.zeros(num_steps, num_processes, self.z_samples, self.feature_size)
+        if self.multitask:
+            self.w_storage = torch.zeros(num_steps, num_processes, self.feature_dim)
+            self.z_storage = torch.zeros(num_steps, num_processes, self.z_samples, self.feature_dim)
 
 
     def to(self, device):
@@ -70,9 +77,10 @@ class RolloutStorage(object):
             self.psis = self.psis.to(device)
         self.estimated_rewards = self.estimated_rewards.to(device)
         if self.multitask:
-            self.z_storage.to(device)
+            self.w_storage = self.w_storage.to(device)
+            self.z_storage = self.z_storage.to(device)
 
-    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, feature, psi, estimated_reward, z = None):
+    def insert(self, obs, recurrent_hidden_states, actions, action_log_probs, value_preds, rewards, masks, feature, psi, estimated_reward, w = None,z = None):
         self.obs[self.step + 1].copy_(obs)
         self.recurrent_hidden_states[self.step + 1].copy_(recurrent_hidden_states)
         self.actions[self.step].copy_(actions)
@@ -92,7 +100,8 @@ class RolloutStorage(object):
             self.estimated_rewards[self.step].copy_(estimated_reward)
         self.step = (self.step + 1) % self.num_steps
         if self.multitask > 0:
-            self.z_storage[self.step].copy(z)
+            self.w_storage[self.step].copy_(w)
+            self.z_storage[self.step].copy_(z)
 
     def after_update(self):
         self.obs[0].copy_(self.obs[-1])
@@ -101,6 +110,7 @@ class RolloutStorage(object):
         # TODO double check if this is needed
         if not self.a2csf:
             self.features[0].copy_(self.features[-1])
+        self.w_storage[0].copy_(self.w_storage[-1])
 
     def compute_returns(self, next_value, use_gae, gamma, tau, sf = False):
         if use_gae:
@@ -130,9 +140,18 @@ class RolloutStorage(object):
                 self.psi_returns[step] = self.psi_returns[step + 1] * \
                 gamma * self.masks[step+1].repeat(1,self.psi_returns.shape[-1]) + self.features[step+1]
         else:
-            for step in reversed(range(self.psis.size(0))):
-                self.psi_returns[step] = self.psi_returns[step + 1] * \
-                gamma * self.masks[step+1].repeat(1,self.psi_returns.shape[-1]) + self.features[step]
+            interleave_factor = self.psi_returns[0].shape[0] // self.features[0].shape[0]
+            if self.multitask:
+                for step in reversed(range(self.psis.size(0))):
+                    self.psi_returns[step] = self.psi_returns[step + 1] * \
+                    gamma * torch.repeat_interleave(self.masks[step+1].repeat(1,self.psi_returns.shape[-1]), interleave_factor, dim = 0) + \
+                    torch.repeat_interleave(self.features[step], interleave_factor, dim = 0)
+            else:
+                for step in reversed(range(self.psis.size(0))):
+                    self.psi_returns[step] = self.psi_returns[step + 1] * \
+                    gamma * self.masks[step+1].repeat(1,self.psi_returns.shape[-1]) + \
+                    self.features[step]
+
 
         # function to use if computing the returns where the critic is
         # based on a successor feature

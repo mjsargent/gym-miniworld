@@ -76,6 +76,11 @@ def get_args():
                         help = "how often (in steps) to switch tasks")
     parser.add_argument('--feature_size', type = int, default = -1,
                         help = "how large the learnt feature is (if less than one, use the env features ")
+    parser.add_argument('--z_samples', type = int, default = 15,
+                        help = "number of samples to use for GPI")
+    parser.add_argument('--gpi_eval', type = str, default = "training_set",
+                        choices=["training_set", "test_task", "training_set_and_test_task"],
+                        help = "set of tasks to perform GPI over in the eval state")
     args = parser.parse_args()
 
     args.cuda = not args.no_cuda and torch.cuda.is_available()

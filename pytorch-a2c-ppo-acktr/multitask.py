@@ -3,6 +3,7 @@ import glob
 import os
 import time
 import types
+import random
 from collections import deque
 
 import gym
@@ -60,6 +61,23 @@ def gather_steps(tensor, steps):
     """
     return tensor[steps - 1, torch.arange(tensor.shape[1]), :]
 
+def make_w(task_rewards, num_processes, device):
+    # feature is  box ball key
+    w = [task_rewards["box"], task_rewards["ball"], task_rewards["key"]]
+    w = torch.tensor(w).unsqueeze(0).unsqueeze(0).to(device)
+    return w.repeat(1,num_processes,1)
+
+def make_gpi_set(gpi_set: str, num_processes, device, training_set = None, test_task = None):
+    if gpi_set == "training_set":
+        z = torch.cat([make_w(task, num_processes, device) for task in training_set] , dim = 1)
+    elif gpi_set == "test_task":
+        z = make_w(test_task, num_processes, device)
+    elif gpi_set == "training_set_and_test_task":
+        z_train = torch.cat([make_w(task, num_processes, device) for task in training_set] , dim = 1)
+        z_test = make_w(test_task, num_processes, device)
+        z = torch.cat([z_train, z_test], dim = 1).float()
+    return z
+
 def multitask():
     torch.set_num_threads(1)
     device = torch.device("cuda:0" if args.cuda else "cpu")
@@ -82,15 +100,15 @@ def multitask():
 
     if args.algo == "a2csf":
         actor_critic = SFConditionedPolicy(envs.observation_space.shape, envs.action_space, feature_size = feature_size, learn_phi = learn_phi,
-            base_kwargs={'recurrent': args.recurrent_policy})
+            multitask = True, base_kwargs={'recurrent': args.recurrent_policy})
         actor_critic.to(device)
     elif args.algo == "a2cx":
         actor_critic = XPolicy(envs.observation_space.shape, envs.action_space, feature_size = feature_size,
-            max_repeat = args.max_repeat, base_kwargs={'recurrent': args.recurrent_policy})
+            max_repeat = args.max_repeat, multitask = True, base_kwargs={'recurrent': args.recurrent_policy})
         actor_critic.to(device)
     elif args.algo == "a2csfx":
         actor_critic = SFConditionedXPolicy(envs.observation_space.shape, envs.action_space, feature_size = feature_size,
-            max_repeat = args.max_repeat, base_kwargs={'recurrent': args.recurrent_policy})
+            max_repeat = args.max_repeat, multitask = True, base_kwargs={'recurrent': args.recurrent_policy})
         actor_critic.to(device)
     else:
         actor_critic = Policy(envs.observation_space.shape, envs.action_space, feature_size = feature_size,
@@ -147,13 +165,13 @@ def multitask():
         rollouts = TemporallyExtendedRolloutStorage(args.num_steps, args.num_processes,
                         envs.observation_space.shape, envs.action_space,
                         actor_critic.recurrent_hidden_state_size, feature_dim = feature_size,
-                                  a2csf = use_a2csf_storage)
+                                  a2csf = use_a2csf_storage, z_samples = args.z_samples)
     else:
         rollouts = RolloutStorage(args.num_steps, args.num_processes,
                         envs.observation_space.shape, envs.action_space,
                         actor_critic.recurrent_hidden_state_size, feature_dim = feature_size,
-                                  a2csf = use_a2csf_storage)
-
+                                  a2csf = use_a2csf_storage, z_samples = args.z_samples)
+    num_processes = args.num_processes
 
     obs = envs.reset()
 
@@ -175,17 +193,40 @@ def multitask():
                     {"ball": 0, "box": 1, "key": 0},
                     {"ball": 0, "box": 0, "key": 1}
                     ]
+    test_set = [["110",{"ball": 1, "box": 1, "key": 0}],
+                ["011",{"ball": 0, "box": 1, "key": 1}],
+                ["101",{"ball": 1, "box": 0, "key": 1}],
+                ["1-10",{"ball": 1, "box": -1, "key": 0}],
+                ["10-1",{"ball": 1, "box": 0, "key": -1}],
+                ["1-1-1",{"ball": 1, "box": -1, "key": -1}],
+                ["-110",{"ball": -1, "box": 1, "key": 0}],
+                ["01-1",{"ball": 0, "box": 1, "key": -1}],
+                ["-11-1",{"ball": -1, "box": 1, "key": -1}],
+                ["-101",{"ball": -1, "box": 0, "key": 1}],
+                ["0-11",{"ball": 0, "box": -1, "key": 1}],
+                ["-1-11",{"ball": -1, "box": -1, "key": 1}],
+                ]
+
+    episode_rewards_acc = torch.zeros(num_processes, requires_grad = False)
 
     if args.algo == "a2csf":
+        task_rewards = random.choice(training_set)
+        w = make_w(task_rewards, num_processes, device)
+        rollouts.w_storage[0].copy_(w[0])
+        obs = envs.switch(task_rewards)
         for j in range(num_updates):
             for step in range(args.num_steps):
+                # sample a training task:
+
                 # Sample actions
                 with torch.no_grad():
-                    value, action, action_log_prob, recurrent_hidden_states, psi, feature = actor_critic.act(
+                    value, action, action_log_prob, recurrent_hidden_states, psi, feature, z = actor_critic.act(
                             rollouts.obs[step],
                             rollouts.recurrent_hidden_states[step],
                             rollouts.masks[step],
-                            rollouts.features[step])
+                            rollouts.features[step],
+                            w = rollouts.w_storage[step],
+                            z_n = args.z_samples)
                 # Obser reward and next obs
                 obs, reward, done, infos = envs.step(action)
 
@@ -205,24 +246,33 @@ def multitask():
                         print(reward)
                         episode_rewards.append(info['episode']['r'])
                 """
-
-                # FIXME: works only for environments with sparse rewards
+                episode_rewards_acc += reward.squeeze(1)
                 for idx, eps_done in enumerate(done):
                     if eps_done:
-                        episode_rewards.append(np.array(reward[idx]))
+                        episode_rewards.append(np.array(episode_rewards_acc[idx]))
+                        episode_rewards_acc[idx] = 0
+                        new_task = random.choice(training_set)
+                        new_w = make_w(new_task, 1, device)
+                        if step < args.num_steps - 1:
+                            # a bit hacky - if an episode ends on the last step
+                            # of the rollout will we end up using the same w
+                            # again
+                            rollouts.w_storage[step + 1][idx].copy_(new_w[0][0])
+
 
                 # If done then clean the history of observations.
                 masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
-                rollouts.insert(obs, recurrent_hidden_states, action, action_log_prob, value, reward, masks, feature, psi, estimated_reward)
+                rollouts.insert(obs, recurrent_hidden_states, action, action_log_prob, value, reward, masks, feature, psi, estimated_reward, w = w[0], z = z[0])
 
             with torch.no_grad():
                 next_value, next_psi, next_phi= actor_critic.get_value(rollouts.obs[-1],
                                                     rollouts.recurrent_hidden_states[-1],
                                                     rollouts.masks[-1],
-                                                    rollouts.features[-1])
+                                                    rollouts.features[-1],
+                                                    w = rollouts.w_storage[-1])
 
 
-            rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.tau, sf = True)
+            #rollouts.compute_returns(next_value, args.use_gae, args.gamma, args.tau, sf = True)
             rollouts.compute_psi_returns(next_psi,args.gamma, next_phi)
 
             value_loss, action_loss, dist_entropy, psi_loss, w_loss, phi_loss = agent.update(rollouts)
@@ -277,65 +327,74 @@ def multitask():
                            }, step = total_num_steps)
 
 
-            if args.task_switch_interval > 0 and task_switch_counter > args.task_switch_interval:
-                obs = envs.switch()
-                task_switch_counter = 0
-
             if args.eval_interval is not None and len(episode_rewards) > 1 and j % args.eval_interval == 0:
                 eval_envs = make_vec_envs(args.env_name, args.seed + args.num_processes, args.num_processes,
                                     args.gamma, eval_log_dir, args.add_timestep, device, True)
 
-                if eval_envs.venv.__class__.__name__ == "VecNormalize":
-                    eval_envs.venv.ob_rms = envs.venv.ob_rms
 
-                    # An ugly hack to remove updates
-                    def _obfilt(self, obs):
-                        if self.ob_rms:
-                            obs = np.clip((obs - self.ob_rms.mean) / np.sqrt(self.ob_rms.var + self.epsilon), -self.clipob, self.clipob)
-                            return obs
-                        else:
-                            return obs
+                for test_task in test_set:
+                    test_reward_dict = test_task[1]
+                    test_w = make_w(test_reward_dict, num_processes, device).float()
+                    gpi_z = make_gpi_set(args.gpi_eval, num_processes, device, training_set, test_reward_dict)
+                    gpi_z = gpi_z.float()
+                    obs = eval_envs.switch(test_reward_dict)
 
-                    eval_envs.venv._obfilt = types.MethodType(_obfilt, envs.venv)
+                    if eval_envs.venv.__class__.__name__ == "VecNormalize":
+                        eval_envs.venv.ob_rms = envs.venv.ob_rms
 
-                eval_episode_rewards = []
+                        # An ugly hack to remove updates
+                        def _obfilt(self, obs):
+                            if self.ob_rms:
+                                obs = np.clip((obs - self.ob_rms.mean) / np.sqrt(self.ob_rms.var + self.epsilon), -self.clipob, self.clipob)
+                                return obs
+                            else:
+                                return obs
 
-                obs = eval_envs.reset()
-                eval_recurrent_hidden_states = torch.zeros(args.num_processes,
-                                actor_critic.recurrent_hidden_state_size, device=device)
-                eval_masks = torch.zeros(args.num_processes, 1, device=device)
+                        eval_envs.venv._obfilt = types.MethodType(_obfilt, envs.venv)
 
-                # create a dummy feature
-                eval_features = torch.zeros([args.num_processes, feature_size])
+                    eval_episode_rewards = []
+                    eval_episode_rewards_acc = torch.zeros(num_processes)
 
-                while len(eval_episode_rewards) < 10:
-                    with torch.no_grad():
-                        _, action, _, eval_recurrent_hidden_states = actor_critic.act(
-                            obs, eval_recurrent_hidden_states, eval_masks, eval_features, deterministic=True)
+                    obs = eval_envs.reset()
+                    eval_recurrent_hidden_states = torch.zeros(args.num_processes,
+                                    actor_critic.recurrent_hidden_state_size, device=device)
+                    eval_masks = torch.zeros(args.num_processes, 1, device=device)
 
-                    # Obser reward and next obs
-                    obs, reward, done, infos = eval_envs.step(action)
+                    # create a dummy feature
+                    eval_features = torch.zeros([args.num_processes, feature_size])
 
-                    _feature = []
-                    for info in infos:
-                        if "feature" in info.keys():
-                            _feature.append(info["feature"])
-                    eval_feature = np.stack(_feature, axis = 0)
 
-                    eval_masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done])
-                    for info in infos:
-                        if 'episode' in info.keys():
-                            eval_episode_rewards.append(info['episode']['r'])
+                    while len(eval_episode_rewards) < 50:
+                        with torch.no_grad():
+                            _, action, _, eval_recurrent_hidden_states, _, _, _ = actor_critic.act(
+                                obs, eval_recurrent_hidden_states, eval_masks, eval_features, deterministic=True,
+                                 w = test_w[0], z = gpi_z[0]
+                            )
+                        # Obser reward and next obs
+                        obs, reward, done, infos = eval_envs.step(action)
+                        eval_episode_rewards+= reward.squeeze(1)
+                        _feature = []
+                        for info in infos:
+                            if "feature" in info.keys():
+                                _feature.append(info["feature"])
+                        eval_features = torch.FloatTensor(np.stack(_feature, axis = 0)).to(device)
+
+                        for idx, eps_done in enumerate(done):
+                            if eps_done:
+                                eval_episode_rewards.append(np.array(eval_episode_rewards_acc[idx]))
+                                eval_episode_rewards_acc[idx] = 0
+                        eval_masks = torch.FloatTensor([[0.0] if done_ else [1.0] for done_ in done]).to(device)
+
+
+                    print(" Evaluation of task {} using {} episodes: mean reward {:.5f}\n".format(
+                        test_task[0],
+                        len(eval_episode_rewards),
+                        np.mean(eval_episode_rewards)
+                                    ))
+                    wandb.log({f"mean_eval_reward, {test_task[0]}": np.mean(eval_episode_rewards),
+                            }, step = total_num_steps)
 
                 eval_envs.close()
-
-                print(" Evaluation using {} episodes: mean reward {:.5f}\n".format(
-                    len(eval_episode_rewards),
-                    np.mean(eval_episode_rewards)
-                                   ))
-                wandb.log({"mean_eval_reward": np.mean(eval_episode_rewards),
-                           }, step = total_num_steps)
-
 
             """
             if args.vis and j % args.vis_interval == 0:
@@ -916,7 +975,7 @@ def multitask():
 
         envs.close()
 
-if __name__ == "__multitask__":
+if __name__ == "__main__":
 
     set_start_method('forkserver')
     multitask()

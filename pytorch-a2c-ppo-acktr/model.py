@@ -203,12 +203,13 @@ class SFConditionedPolicy(nn.Module):
 
     def sample_z(self, w, z_n):
         # make sure w is a float
-        z = torch.normal(w.repeat(z_n, w.shape[1]).float(), std = self.z_sigma)
+
+        z = torch.normal(w.repeat(z_n, 1).float(), std = self.z_sigma)
         return z
 
     def act(self, inputs, rnn_hxs, masks, features, deterministic=False, w = None, z = None, z_n = 30):
 
-        value, actor_features, rnn_hxs, psi, latent = self.base(inputs, rnn_hxs, masks, features, w)
+        value, actor_features, rnn_hxs, psi, latent = self.base(inputs, rnn_hxs, masks, features, w = w)
 
         dist = self.dist(actor_features)
 
@@ -216,28 +217,41 @@ class SFConditionedPolicy(nn.Module):
             if z == None:
                 z_gpi = self.sample_z(w, z_n)
 
+                # make sure the baseline output is stacked on top of the GPI
+                # outputs
+                value_gpi, actor_feature_gpi, psi_gpi = self.base.forward_GPI(latent, masks, z_gpi, w)
+                actor_features = actor_features.unsqueeze(1)
+                actor_feature_gpi = actor_feature_gpi.view(inputs.shape[0], z_n, -1)
+                actor_feature_gpi = torch.cat([actor_features, actor_feature_gpi], axis =1).view(-1, actor_features.shape[-1])
 
-                value_gpi, actor_feature_gpi, psi_gpi = self.base.forward_GPI(latent, masks, z_gpi)
-                actor_feature_gpi = torch.cat([actor_feature, actor_feature_gpi], axis = -1)
-                value_gpi = torch.cat([value, value_gpi])
+                value = value.unsqueeze(1)
+                value_gpi = value_gpi.view(inputs.shape[0], z_n, -1)
+                value = torch.cat([value, value_gpi], axis = 1).view(-1, value.shape[-1])
+                max_gpi_value = torch.argmax(value.view(inputs.shape[0], (z_n +1)), dim = -1)
 
-                dist_gpi = self.dist(actor_feature_gpi)
-                max_gpi_value = torch.argmax(value_gpi, dim = -1)
+                actor_feature_gpi = actor_feature_gpi.view(inputs.shape[0], (z_n + 1), -1)
+                best_actor_feature = actor_feature_gpi[torch.arange(actor_feature_gpi.shape[0]), max_gpi_value, :]
+                best_dists = self.dist(best_actor_feature)
+
+                psi = psi.unsqueeze(1)
+                psi_gpi = psi_gpi.view(inputs.shape[0], z_n, -1)
+                psi = torch.cat([psi, psi_gpi], dim = 1).view(-1, psi.shape[-1])
+
 
             else:
                 z_gpi = z
-                value_gpi, actor_feature_gpi, psi_gpi = self.base.forward_GPI(latent, masks, z)
-                dist_gpi = self.dist(actor_feature_gpi)
+                value_gpi, actor_feature_gpi, psi_gpi = self.base.forward_GPI(latent, masks, z, w)
+                actor_feature_gpi = actor_feature_gpi.view(inputs.shape[0], z_gpi.shape[0] // inputs.shape[0], -1)
+                value_gpi = value_gpi.view(inputs.shape[0], z_gpi.shape[0] // inputs.shape[0])
                 max_gpi_value = torch.argmax(value_gpi, dim = -1)
-                # if we are not training, the z we got was the set which we are
-                # going to do GPI over so no need to sample more
+                best_actor_feature = actor_feature_gpi[torch.arange(actor_feature_gpi.shape[0]), max_gpi_value, :]
 
-            best_dists = dist_gpi[torch.arange(dist.shape[0]), max_gpi_value]
+                best_dists = self.dist(best_actor_feature)
 
             if deterministic:
                 action = best_dists.mode()
             else:
-                action = best_dist.sample()
+                action = best_dists.sample()
 
         else:
 
@@ -247,38 +261,94 @@ class SFConditionedPolicy(nn.Module):
                 action = dist.sample()
 
             z_gpi = None
-            psi_gpi = psi
+            #psi_gpi = psi
 
         action_log_probs = dist.log_probs(action)
-        dist_entropy = dist.entropy().mean()
+        #dist_entropy = dist.entropy().mean()
 
         if self.learn_phi:
             phi = self.phi_net.get_feature(inputs)
         else:
             phi = None
 
-        return value, action, action_log_probs, rnn_hxs, psi_gpi, phi, z_gpi
+        return value, action, action_log_probs, rnn_hxs, psi, phi, z_gpi
 
-    def get_value(self, inputs, rnn_hxs, masks, features = None):
+    def get_value(self, inputs, rnn_hxs, masks, features = None, w = None, z = None, z_n = 15):
         phi = None
-        value, _, _, psi, _ = self.base(inputs, rnn_hxs, masks, features)
+        value, _, _, psi, latent = self.base(inputs, rnn_hxs, masks, features, w = w)
+        if self.multitask:
+            if z == None:
+                z_gpi = self.sample_z(w, z_n)
+
+                value_gpi, actor_feature_gpi, psi_gpi = self.base.forward_GPI(latent, masks, z_gpi, w )
+                value = value.unsqueeze(1)
+                value_gpi = value_gpi.view(inputs.shape[0], z_n, -1)
+                value = torch.cat([value, value_gpi], axis = 1).view(-1, value.shape[-1])
+
+                psi = psi.unsqueeze(1)
+                psi_gpi = psi_gpi.view(inputs.shape[0], z_n, -1)
+                psi = torch.cat([psi, psi_gpi], dim = 1).view(-1, psi.shape[-1])
+
+
+            else:
+                z_gpi = z
+                value_gpi, actor_feature_gpi, psi_gpi = self.base.forward_GPI(latent, masks, z, w)
+                dist_gpi = self.dist(actor_feature_gpi)
+                max_gpi_value = torch.argmax(value_gpi, dim = -1)
+                # if we are not training, the z we got was the set which we are
+                # going to do GPI over so no need to sample more
+
+                best_dists = dist_gpi[torch.arange(dist.shape[0]), max_gpi_value]
+
         if self.learn_phi:
             phi = self.phi_net.get_feature(inputs)
         return value, psi, phi
 
-    def evaluate_actions(self, inputs, rnn_hxs, masks, action, features = None, z = None):
-        value, actor_features, rnn_hxs, psi, latent = self.base(inputs, rnn_hxs, masks, features)
+    def evaluate_actions(self, inputs, rnn_hxs, masks, action, features = None, w = None, z = None):
+
         if self.multitask:
+            #w = w.unsqueeze(2)
+            #z = torch.cat([w, z], dim = 2)
+            T = w.shape[0]
+            B = w.shape[1]
+            z_n = z.shape[2]
+            z = z.view(-1, z.shape[-1])
+            w = w.view(-1, w.shape[-1])
             # we only need the ""
-            value_gpi, actor_feature_gpi, psi_gpi =  self.base.forward_GPI(latent, masks, z)
-        dist = self.dist(actor_features)
+
+            value, actor_features, _, psi, latent = self.base(inputs, rnn_hxs, masks, features, w = w)
+
+            value_gpi, actor_feature_gpi, psi_gpi = self.base.forward_GPI(latent, masks, z, w)
+            actor_feature_gpi = actor_feature_gpi.view(T, B, z_n, -1)
+            actor_features = actor_features.view(T,B,-1).unsqueeze(2)
+            actor_features = torch.cat([actor_features, actor_feature_gpi], axis =2).view(-1, actor_features.shape[-1])
+
+            value = value.unsqueeze(1)
+            value_gpi = value_gpi.view(inputs.shape[0], z_n, -1)
+            value = torch.cat([value, value_gpi], axis = 1).view(-1, value.shape[-1])
+            max_gpi_value = torch.argmax(value.view(inputs.shape[0], (z_n +1)), dim = -1)
+
+            #actor_feature = actor_feature_gpi.view(inputs.shape[0], (z_n + 1), -1)
+
+            psi = psi.view(T, B, -1).unsqueeze(2)
+            psi_gpi = psi_gpi.view(T, B, z_n, -1)
+            psi = torch.cat([psi, psi_gpi], dim = 2).view(-1, psi.shape[-1])
+
+
+            dist = self.dist(actor_features)
+        else:
+            value, actor_features, rnn_hxs, psi, latent = self.base(inputs, rnn_hxs, masks, features, w)
+            dist = self.dist(actor_features)
 
         action_log_probs = dist.log_probs(action)
+
         dist_entropy = dist.entropy().mean()
+
         return value, action_log_probs, dist_entropy, rnn_hxs, psi
 
     def evaluate_rewards(self, features):
-        predicted_rewards = torch.matmul(features, self.base.w.t())
+        with torch.no_grad():
+            predicted_rewards = torch.matmul(features, self.base.w.t())
         return predicted_rewards
 
 class SFConditionedXPolicy(nn.Module):
@@ -895,36 +965,40 @@ class CNNSFBase(NNBase):
             w_embedding = self.task_embedding(w)
             x = torch.cat([latent, w_embedding], axis = -1)
         else:
-            with torch.no_grad():
-                w = self.w
+            w = self.w.clone().detach()
             w_embedding = self.task_embedding(w.repeat(x.shape[0], 1))
             x = torch.cat([latent, w_embedding], axis = -1)
-            w = w.t()
+
+            #w = w.t()
 
         psi = self.sf(x)
-        critic_value = torch.matmul(psi, w)
+        critic_value = torch.sum(psi * w, dim = -1, keepdim = True)
+
 
         return critic_value, x, rnn_hxs, psi, latent
 
-    def forward_GPI(self, latent, masks, w):
+    def forward_GPI(self, latent, masks, z, w):
         # needs non flattened inputs
         # w: t x b x n_z x phi_dim
         # repeat interleve for the latent to match up each agent with the
         # correct phi
-        latent = torch.repeat_interleave(latent, w.shape[2], dim = 1)
-        w = w.view(-1, w.shape[3])
-        w_embedding = self.task_embedding(w)
-        x = torch.cat([latent, w_embedding], axis = -1)
+        latent = torch.repeat_interleave(latent, z.shape[0] // latent.shape[0], dim = 0)
+        z = z.view(-1, z.shape[1])
+        z_embedding = self.task_embedding(z)
+
+        x = torch.cat([latent, z_embedding], axis = -1)
         psi = self.sf(x)
-        critic_value = torch.matmul(psi, w)
+
+        # w should be the same for all processes, but we will keep the repeat
+        # interleave incase it isn't for some reason
+        w = torch.repeat_interleave(w.view(-1, w.shape[1]), z.shape[0] // w.shape[0], dim = 0)
+        critic_value = torch.sum(psi*w, dim = -1, keepdim = True)
+
         return critic_value, x, psi
 
 
     def act_GPI(self, latent, masks, w):
         pass
-
-
-
 
 class MLPBase(NNBase):
     def __init__(self, num_inputs, feature_size = 2, recurrent=False, hidden_size=64, SF=False,Q=False, num_actions = 3):

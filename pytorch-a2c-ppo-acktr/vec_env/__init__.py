@@ -87,6 +87,9 @@ class VecEnvWrapper(VecEnv):
     def render(self):
         self.venv.render()
 
+    def switch(self, reward_dict = None):
+        self.venv.switch(reward_dict)
+
 class CloudpickleWrapper(object):
     """
     Uses cloudpickle to serialize contents (otherwise multiprocessing tries to use pickle)

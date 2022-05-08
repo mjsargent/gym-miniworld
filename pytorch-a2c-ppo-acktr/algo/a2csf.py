@@ -48,16 +48,35 @@ class A2C_SF():
         obs_shape = rollouts.obs.size()[2:]
         action_shape = rollouts.actions.size()[-1]
         num_steps, num_processes, _ = rollouts.rewards.size()
+        if self.multitask:
+            z_n = rollouts.z_storage.shape[2]
+            actions = torch.repeat_interleave(rollouts.actions, (z_n+1), dim = 1)
+        else:
+            actions = rollouts.actions
+        if self.multitask:
+            values, action_log_probs, dist_entropy, _, psi = self.actor_critic.evaluate_actions(
+                rollouts.obs[:-1].view(-1, *obs_shape),
+                rollouts.recurrent_hidden_states[0].view(-1, self.actor_critic.recurrent_hidden_state_size),
+                rollouts.masks[:-1].view(-1, 1),
+                actions.view(-1, action_shape),
+                rollouts.features[:-1].view(-1, self.feature_size),
+                w = rollouts.w_storage,
+                z = rollouts.z_storage)
+        else:
+            values, action_log_probs, dist_entropy, _, psi = self.actor_critic.evaluate_actions(
+                rollouts.obs[:-1].view(-1, *obs_shape),
+                rollouts.recurrent_hidden_states[0].view(-1, self.actor_critic.recurrent_hidden_state_size),
+                rollouts.masks[:-1].view(-1, 1),
+                actions.view(-1, action_shape),
+                rollouts.features[:-1].view(-1, self.feature_size))
 
-        values, action_log_probs, dist_entropy, _, psi = self.actor_critic.evaluate_actions(
-            rollouts.obs[:-1].view(-1, *obs_shape),
-            rollouts.recurrent_hidden_states[0].view(-1, self.actor_critic.recurrent_hidden_state_size),
-            rollouts.masks[:-1].view(-1, 1),
-            rollouts.actions.view(-1, action_shape),
-            rollouts.features[:-1].view(-1, self.feature_size))
 
         # compute psi loss
-        current_psi = psi.view(num_steps, num_processes, -1)
+        if self.multitask:
+            current_psi = psi.view(num_steps, num_processes * (z_n + 1), -1)
+        else:
+            current_psi = psi.view(num_steps, num_processes, -1)
+
         psi_advantages = rollouts.psi_returns[:-1] - current_psi
         psi_loss = psi_advantages.pow(2).sum(-1).mean()
 
@@ -65,12 +84,20 @@ class A2C_SF():
         #psi_loss = psi_loss.mean()
 
         # compute policy gradient
-        values = values.view(num_steps, num_processes, 1)
-        action_log_probs = action_log_probs.view(num_steps, num_processes, 1)
+        #values = values.view(num_steps, num_processes, 1)
+        if self.multitask:
+            action_log_probs = action_log_probs.view(num_steps, num_processes * (z_n + 1), 1)
+        else:
+            action_log_probs = action_log_probs.view(num_steps, num_processes, 1)
 
 
         #advantages = rollouts.returns[:-1] - values.detach()
-        advantages = (psi_advantages * self.actor_critic.base.w.squeeze(0)).sum(-1)
+        if self.multitask:
+            w_interleave =  torch.repeat_interleave(rollouts.w_storage, (z_n + 1) , 1)
+            advantages = (psi_advantages * w_interleave).sum(-1)
+        else:
+            advantages = (psi_advantages * self.actor_critic.base.w.squeeze(0).detach()).sum(-1)
+
         #value_loss = advantages.pow(2).mean()
 
         action_loss = -(advantages.detach().unsqueeze(-1) * action_log_probs).mean()
@@ -124,11 +151,12 @@ class A2C_SF():
 
             w_loss = F.mse_loss(rollouts.rewards.view(-1,1), predicted_rewards)
 
+            self.w_optimizer.zero_grad()
+
             w_loss.backward()
 
             self.w_optimizer.step()
 
-            self.w_optimizer.zero_grad()
         else:
             w_loss = torch.tensor([0])
 

@@ -131,10 +131,8 @@ class VecPyTorch(VecEnvWrapper):
         reward = torch.from_numpy(np.expand_dims(np.stack(reward), 1)).float()
         return obs, reward, done, info
 
-    def switch(self, idx = None):
-        self.venv.switch(idx)
-
-
+    def switch(self, reward_dict = None):
+        self.venv.switch(reward_dict)
 
 # Derived from
 # https://github.com/openai/baselines/blob/master/baselines/common/vec_env/vec_frame_stack.py
@@ -170,5 +168,5 @@ class VecPyTorchFrameStack(VecEnvWrapper):
     def close(self):
         self.venv.close()
 
-    def switch(self, idx = None):
-        self.venv.switch()
+    def switch(self, reward_dict = None):
+        self.venv.switch(reward_dict)
