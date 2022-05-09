@@ -99,7 +99,7 @@ class RolloutStorage(object):
         if estimated_reward != None:
             self.estimated_rewards[self.step].copy_(estimated_reward)
         self.step = (self.step + 1) % self.num_steps
-        if self.multitask > 0:
+        if self.multitask:
             self.w_storage[self.step].copy_(w)
             self.z_storage[self.step].copy_(z)
 
@@ -110,7 +110,9 @@ class RolloutStorage(object):
         # TODO double check if this is needed
         if not self.a2csf:
             self.features[0].copy_(self.features[-1])
-        self.w_storage[0].copy_(self.w_storage[-1])
+
+        if self.multitask:
+            self.w_storage[0].copy_(self.w_storage[-1])
 
     def compute_returns(self, next_value, use_gae, gamma, tau, sf = False):
         if use_gae:

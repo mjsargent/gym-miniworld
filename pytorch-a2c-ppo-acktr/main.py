@@ -248,7 +248,7 @@ def main():
                 torch.save(save_model, os.path.join(save_path, args.env_name + ".pt"))
 
             total_num_steps = (j + 1) * args.num_processes * args.num_steps
-            task_switch_counter = (j + 1) * args.num_processes * args.num_steps
+            task_switch_counter +=  args.num_processes * args.num_steps
 
             if j % args.log_interval == 0 and len(episode_rewards) > 1:
                 end = time.time()
@@ -394,7 +394,7 @@ def main():
 
             total_num_steps = (j + 1) * args.num_processes * args.num_steps
 
-            task_switch_counter = (j + 1) * args.num_processes * args.num_steps
+            task_switch_counter +=   args.num_processes * args.num_steps
 
             if j % args.log_interval == 0 and len(episode_rewards) > 1:
                 end = time.time()
@@ -554,8 +554,8 @@ def main():
                 torch.save(save_model, os.path.join(save_path, args.env_name + ".pt"))
 
             total_num_steps = (j + 1) * args.num_processes * args.num_steps
+            task_switch_counter += args.num_processes * args.num_steps
 
-            task_switch_counter = (j + 1) * args.num_processes * args.num_steps
             if j % args.log_interval == 0 and len(episode_rewards) > 1:
                 end = time.time()
                 print("Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.2f}/{:.2f}, min/max reward {:.2f}/{:.2f}, success rate {:.2f}\n".
@@ -665,9 +665,21 @@ def main():
 
                 # if we are in the non_repeated phase of learning,
                 # overwrite repeats with zeros
-                if action_only:
-                    repeat = torch.zeros_like(repeat)
-                obs, reward, done, infos = envs.step(action, repeat)
+                if args.exp_scale_repeats:
+                    pow_tensor = 2 * torch.ones_like(repeat)
+                    # this repeat is only for acting, we still need to
+                    # store the raw repeat to index our policy
+                    act_repeat  = torch.pow(pow_tensor, repeat) - 1
+
+                    if action_only:
+                        repeat = torch.zeros_like(repeat)
+                        act_repeat = torch.zeros_like(repeat)
+                    obs, reward, done, infos = envs.step(action, act_repeat)
+
+                else :
+                    if action_only:
+                        repeat = torch.zeros_like(repeat)
+                    obs, reward, done, infos = envs.step(action, repeat)
 
                 # info is a tuple of dicts
                 _feature = []
@@ -713,7 +725,7 @@ def main():
             total_num_steps = total_num_steps + rollouts.steps_taken.sum()
 
             total_num_des = (j + 1) * args.num_processes * args.num_steps
-            task_switch_counter = total_num_steps + rollouts.steps_taken.sum()
+            task_switch_counter +=  rollouts.steps_taken.sum()
             rollouts.after_update()
 
             if j % args.save_interval == 0 and args.save_dir != "":
@@ -799,8 +811,17 @@ def main():
                         _, action, _, eval_recurrent_hidden_states, repeat, _ = actor_critic.act(
                             obs, eval_recurrent_hidden_states, eval_masks, eval_features, deterministic=True)
 
+
                     # Obser reward and next obs
-                    obs, reward, done, infos = eval_envs.step(action, repeat)
+
+                    if args.exp_scale_repeats:
+                        pow_tensor = 2 * torch.ones_like(repeat)
+                        # this repeat is only for acting, we still need to
+                        # store the raw repeat to index our policy
+                        act_repeat  = torch.pow(pow_tensor, repeat) - 1
+                        obs, reward, done, infos = eval_envs.step(action, act_repeat)
+                    else:
+                        obs, reward, done, infos = eval_envs.step(action, repeat)
 
                     _feature = []
                     for info in infos:
@@ -860,9 +881,22 @@ def main():
 
                 # if we are in the non_repeated phase of learning,
                 # overwrite repeats with zeros
-                if action_only:
-                    repeat = torch.zeros_like(repeat)
-                obs, reward, done, infos = envs.step(action, repeat)
+
+                if args.exp_scale_repeats:
+                    pow_tensor = 2 * torch.ones_like(repeat)
+                    # this repeat is only for acting, we still need to
+                    # store the raw repeat to index our policy
+                    act_repeat  = torch.pow(pow_tensor, repeat) - 1
+
+                    if action_only:
+                        repeat = torch.zeros_like(repeat)
+                        act_repeat = torch.zeros_like(repeat)
+                    obs, reward, done, infos = envs.step(action, act_repeat)
+
+                else:
+                    if action_only:
+                        repeat = torch.zeros_like(repeat)
+                    obs, reward, done, infos = envs.step(action, repeat)
 
                 # info is a tuple of dicts
                 _feature = []
@@ -907,7 +941,7 @@ def main():
                 repeat_loss, repeat_dist_entropy, psi_loss, w_loss = agent.update(rollouts, action_only)
 
             total_num_steps = total_num_steps + rollouts.steps_taken.sum()
-            task_switch_counter = total_num_steps + rollouts.steps_taken.sum()
+            task_switch_counter += rollouts.steps_taken.sum()
             total_num_des = (j + 1) * args.num_processes * args.num_steps
 
             rollouts.after_update()
@@ -997,8 +1031,15 @@ def main():
                         _, action, _, eval_recurrent_hidden_states, repeat, _, _ = actor_critic.act(
                             obs, eval_recurrent_hidden_states, eval_masks, eval_features, deterministic=True)
 
-                    # Obser reward and next obs
-                    obs, reward, done, infos = eval_envs.step(action, repeat)
+                    if args.exp_scale_repeats:
+                        pow_tensor = 2 * torch.ones_like(repeat)
+                        # this repeat is only for acting, we still need to
+                        # store the raw repeat to index our policy
+                        act_repeat  = torch.pow(pow_tensor, repeat) - 1
+                        obs, reward, done, infos = eval_envs.step(action, act_repeat)
+                    else:
+
+                        obs, reward, done, infos = eval_envs.step(action, repeat)
 
                     _feature = []
                     for info in infos:
@@ -1111,7 +1152,7 @@ def main():
                 torch.save(save_model, os.path.join(save_path, args.env_name + ".pt"))
 
             total_num_steps = (j + 1) * args.num_processes * args.num_steps
-            task_switch_counter = (j + 1) * args.num_processes * args.num_steps
+            task_switch_counter +=  args.num_processes * args.num_steps
 
             if j % args.log_interval == 0 and len(episode_rewards) > 1:
                 end = time.time()

@@ -81,6 +81,10 @@ def get_args():
     parser.add_argument('--gpi_eval', type = str, default = "training_set",
                         choices=["training_set", "test_task", "training_set_and_test_task"],
                         help = "set of tasks to perform GPI over in the eval state")
+    parser.add_argument('--exp_scale_repeats', type = lambda x: bool(strtobool(x)),
+                        default = False, help = "treat the output of the policy \
+                        network as 2^j instead of j")
+
     args = parser.parse_args()
 
     args.cuda = not args.no_cuda and torch.cuda.is_available()
